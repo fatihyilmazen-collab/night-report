@@ -89,7 +89,7 @@ function blockerCategory(remark) {
   if (!m) return null;
   var t = m[1].trim().toLowerCase();
   if (!t) return 'Other';
-  if (t.indexOf('manpower') === 0) return 'Manpower';
+  if (t.indexOf('manpower') === 0 || /^\w{0,2}anpow/.test(t) || /npower/.test(t)) return 'Manpower';
   if (t.indexOf('time') === 0) return 'Time ran out';
   if (t.indexOf('other') === 0) return 'Other';
   return t.charAt(0).toUpperCase() + t.slice(1);
@@ -204,17 +204,39 @@ function classifyFile(name, mime, parentKind) {
   if (isSheet) return 'dabs';
   if (isImg && /weld|kaynak/.test(n)) return 'welder-img';
   if (isImg && /dabs/.test(n)) return 'ignore';
-  if (isImg) return (parentKind === 'blocker' || /block/.test(n)) ? 'photo-blocker' : 'photo-work';
+  if (isImg && (parentKind === 'blocker' || /block/.test(n))) return 'photo-blocker';
+  if (isImg && parentKind === 'work') return 'photo-work';
+  if (isImg) return 'image';
   return 'ignore';
+}
+
+
+/* What a picture is, judged from the text read out of it. Returns headcount | dabs | welder | photo */
+function classifyImageText(text) {
+  var t = String(text || '').toLowerCase().replace(/\s+/g, ' ');
+  var tradeWords = ['rigger', 'plater', 'scaffolder', 'welder', 'fitter', 'pwht', 'fire watcher', 'materials controller', 'chargehand', 'staff', 'operative', 'labourer', 'electrician'];
+  var trades = tradeWords.filter(function (w) { return t.indexOf(w) >= 0; }).length;
+  if ((/total/.test(t) && trades >= 3) || (/head\s?count/.test(t) && trades >= 2)) return 'headcount';
+  var dabsWords = ['activity description', 'activity desc', 'remark', 'blocker', 'not done', 'ongoing', 'tag no', 'dabs', 'night added'];
+  var dh = dabsWords.filter(function (w) { return t.indexOf(w) >= 0; }).length;
+  if (dh >= 3) return 'dabs';
+  var weldWords = ['welder', 'distribution', 'welding', 'fit up', 'fit-up', 'fitup', 'spool', 'support', 'ready to weld', 'inspection'];
+  var wh = weldWords.filter(function (w) { return t.indexOf(w) >= 0; }).length;
+  if (wh >= 3 || (/welder|distribution/.test(t) && wh >= 2)) return 'welder';
+  return 'photo';
 }
 
 function photoCaption(name) {
   return String(name || '').replace(/\.[a-z0-9]+$/i, '').replace(/^(blockers?|work|photo)[\s_\-]*/i, '').replace(/[_]+/g, ' ').trim();
 }
 
+function isFallback(j) { return /[fg]a[l1i]{1,2}\w{0,2}ack/i.test((j.act || '') + ' ' + (j.remark || '') + ' ' + (j.tag || '')); }
+
 function calcSummary(jobs) {
   var r = { total: 0, done: 0, ongoing: 0, notdone: 0, acts: {}, blockers: {}, night: { total: 0, done: 0, ongoing: 0, notdone: 0 } };
   (jobs || []).forEach(function (j) {
+    /* A fallback job that was not done is not counted as a task at all */
+    if (isFallback(j) && j.status === STATUS.NOTDONE) { r.skippedFallback = (r.skippedFallback || 0) + 1; return; }
     r.total++;
     var key = j.status === STATUS.DONE ? 'done' : j.status === STATUS.ONGOING ? 'ongoing' : 'notdone';
     r[key]++;
@@ -544,6 +566,242 @@ async function tessRec(canvas, opt) {
   return (r.data.text || '').trim();
 }
 
+/* Page text with the engine's own page layout (psm 6 for tables) */
+async function tessPage(canvas, opt) {
+  if (!_tw.page) _tw.page = await Tesseract.createWorker('eng');
+  await _tw.page.setParameters({ tessedit_pageseg_mode: String(opt.psm || 6) });
+  var r = await _tw.page.recognize(canvas);
+  return (r.data.text || '').trim();
+}
+
+/* Words with positions (sparse text mode keeps table cells apart) */
+async function tessWords(canvas) {
+  if (!_tw.sparse) _tw.sparse = await Tesseract.createWorker('eng');
+  await _tw.sparse.setParameters({ tessedit_pageseg_mode: '11' });
+  var r = await _tw.sparse.recognize(canvas, {}, { tsv: true, text: true, blocks: true });
+  var words = r.data.words && r.data.words.length ? r.data.words.map(function (w) { return { t: w.text, x0: w.bbox.x0, y0: w.bbox.y0, x1: w.bbox.x1, y1: w.bbox.y1 }; }) : parseTsvWords(r.data.tsv);
+  return words.filter(function (w) { return String(w.t).trim(); });
+}
+
+/* ---------- Reading pictures by content: what is it, and DABS screenshots ---------- */
+
+/* tesseract TSV -> [{t,x0,y0,x1,y1}] */
+function parseTsvWords(tsv) {
+  var out = [];
+  String(tsv || '').split(/\r?\n/).forEach(function (l) {
+    var c = l.split('\t');
+    if (c.length < 12 || c[0] === 'level' || c[0] !== '5') return;
+    var t = c.slice(11).join('\t').trim();
+    if (!t) return;
+    var x = +c[6], y = +c[7], w = +c[8], h = +c[9];
+    out.push({ t: t, x0: x, y0: y, x1: x + w, y1: y + h });
+  });
+  return out;
+}
+
+/* A page of text (paper, screenshot, table) is mostly light and uncoloured; a site photo is not. */
+async function looksLikeDocument(src) {
+  var im = await loadImg(src), s = 160 / Math.max(im.naturalWidth, im.naturalHeight);
+  var c = document.createElement('canvas');
+  c.width = Math.max(8, Math.round(im.naturalWidth * s)); c.height = Math.max(8, Math.round(im.naturalHeight * s));
+  var x = c.getContext('2d'); x.drawImage(im, 0, 0, c.width, c.height);
+  var d = x.getImageData(0, 0, c.width, c.height).data, light = 0, n = c.width * c.height;
+  for (var i = 0; i < n; i++) {
+    var r = d[4 * i], g = d[4 * i + 1], b = d[4 * i + 2], mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    if (mn > 175 && mx - mn < 45) light++;
+  }
+  return light / n > 0.28;
+}
+
+function scaledCanvas(src, maxW, rot) {
+  return loadImg(src).then(function (im) {
+    var w = im.naturalWidth, h = im.naturalHeight, sc = Math.min(2.5, Math.max(0.5, maxW / Math.max(w, h)));
+    if (rot) { var t = w; w = h; h = t; }
+    var c = document.createElement('canvas');
+    c.width = Math.round(w * sc); c.height = Math.round(h * sc);
+    var x = c.getContext('2d');
+    x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
+    if (rot) { x.translate(c.width / 2, c.height / 2); x.rotate(rot * Math.PI / 180); x.drawImage(im, -im.naturalWidth * sc / 2, -im.naturalHeight * sc / 2, im.naturalWidth * sc, im.naturalHeight * sc); }
+    else x.drawImage(im, 0, 0, c.width, c.height);
+    return c;
+  });
+}
+
+/* Looks at the whole picture and returns {kind, rot}. kind: headcount | dabs | welder | photo */
+async function classifyImage(src, rec) {
+  if (!(await looksLikeDocument(src))) return { kind: 'photo', rot: 0 };
+  var rots = [0, 90, 270];
+  for (var i = 0; i < rots.length; i++) {
+    var cv = await scaledCanvas(src, 1800, rots[i]);
+    var txt = await rec(cv, { digits: false, psm: 6 });
+    var k = classifyImageText(txt);
+    if (k !== 'photo') return { kind: k, rot: rots[i] };
+    /* readable upright text that matches nothing: stop turning it */
+    var words = (txt.match(/[A-Za-z]{4,}/g) || []).length;
+    if (i === 0 && words > 40) break;
+  }
+  return { kind: 'photo', rot: 0 };
+}
+
+/* Coloured status cells (red = NOT DONE, green, amber) found by colour, then read by their words. */
+function statusFromText(t) {
+  var u = String(t || '').toUpperCase().replace(/[^A-Z]/g, '');
+  if (!u) return '';
+  if (/NOT|NOTD|OTDO/.test(u)) return STATUS.NOTDONE;
+  if (/ONG|GOI|NGO|OING|ING$/.test(u)) return STATUS.ONGOING;
+  if (/DONE|DON|ONE/.test(u)) return STATUS.DONE;
+  return '';
+}
+
+function tintComponents(cv) {
+  var W = cv.width, H = cv.height, d = cv.getContext('2d').getImageData(0, 0, W, H).data, B = 4;
+  var gw = Math.ceil(W / B), gh = Math.ceil(H / B), on = new Uint8Array(gw * gh), pink = new Uint32Array(gw * gh);
+  for (var by = 0; by < gh; by++) for (var bx = 0; bx < gw; bx++) {
+    var cnt = 0, tot = 0, pk = 0;
+    for (var y = by * B; y < Math.min(H, by * B + B); y++) for (var x = bx * B; x < Math.min(W, bx * B + B); x++) {
+      var k = 4 * (y * W + x), r = d[k], g = d[k + 1], b = d[k + 2], mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+      tot++;
+      if (mn >= 140 && mx - mn >= 22) { cnt++; if (r > g + 25) pk++; }
+    }
+    on[by * gw + bx] = cnt >= 0.3 * tot ? 1 : 0;
+    pink[by * gw + bx] = pk >= 0.5 * cnt ? 1 : 0;
+  }
+  var seen = new Uint8Array(gw * gh), comps = [];
+  for (var s = 0; s < on.length; s++) {
+    if (!on[s] || seen[s]) continue;
+    var st = [s], minX = gw, minY = gh, maxX = -1, maxY = -1, area = 0, pkc = 0;
+    seen[s] = 1;
+    while (st.length) {
+      var p = st.pop(), px = p % gw, py = (p - px) / gw;
+      area++; pkc += pink[p];
+      if (px < minX) minX = px; if (px > maxX) maxX = px; if (py < minY) minY = py; if (py > maxY) maxY = py;
+      [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(function (o) {
+        var nx = px + o[0], ny = py + o[1];
+        if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) return;
+        var q = ny * gw + nx;
+        if (on[q] && !seen[q]) { seen[q] = 1; st.push(q); }
+      });
+    }
+    var bw = (maxX - minX + 1), bh = (maxY - minY + 1);
+    if (area < 0.55 * bw * bh) continue;
+    comps.push({ x0: minX * B, y0: minY * B, x1: (maxX + 1) * B, y1: (maxY + 1) * B, pink: pkc > 0.5 * area });
+  }
+  return comps;
+}
+
+/* Neighbouring cells share one coloured block; cut it at the dark horizontal grid lines. */
+function splitAtLines(cv, comps) {
+  var W = cv.width, ctx = cv.getContext('2d'), out = [];
+  comps.forEach(function (c) {
+    var w = c.x1 - c.x0, h = c.y1 - c.y0;
+    if (w < 4 || h < 4) return;
+    var d = ctx.getImageData(c.x0, c.y0, w, h).data, cuts = [];
+    for (var y = 0; y < h; y++) {
+      var dark = 0;
+      for (var x = 0; x < w; x++) { var k = 4 * (y * w + x); if (d[k] + d[k + 1] + d[k + 2] < 330) dark++; }
+      if (dark > 0.55 * w) cuts.push(y);
+    }
+    var start = 0, prev = -2;
+    cuts.forEach(function (y) { if (y !== prev + 1) { if (y - 1 >= start) out.push({ x0: c.x0, x1: c.x1, y0: c.y0 + start, y1: c.y0 + y, pink: c.pink }); } prev = y; if (y >= start) start = y + 1; });
+    if (h - 1 >= start) out.push({ x0: c.x0, x1: c.x1, y0: c.y0 + start, y1: c.y1, pink: c.pink });
+  });
+  return out;
+}
+
+function grayFromCanvas(cv) {
+  var W = cv.width, H = cv.height, d = cv.getContext('2d').getImageData(0, 0, W, H).data, g = new Uint8Array(W * H);
+  for (var i = 0; i < g.length; i++) g[i] = (d[4 * i] * 0.299 + d[4 * i + 1] * 0.587 + d[4 * i + 2] * 0.114) | 0;
+  return { w: W, h: H, g: g };
+}
+
+/* x positions of dark vertical grid lines inside a horizontal strip */
+function verticalLines(gray, y0, y1) {
+  var W = gray.w, g = gray.g, flags = [], h = y1 - y0 + 1;
+  for (var x = 0; x < W; x++) {
+    var n = 0;
+    for (var y = y0; y <= y1; y++) if (g[y * W + x] < 120) n++;
+    flags.push(n > 0.75 * h);
+  }
+  return runGroups(flags).map(function (r) { return (r.s + r.e) >> 1; });
+}
+
+async function readCell(gray, x0, y0, x1, y1, rec, psm, th) {
+  if (x1 - x0 < 6 || y1 - y0 < 4) return '';
+  var cv = cellCanvas(gray, Math.round(x0), Math.round(y0), Math.round(x1), Math.round(y1), th || 160, 3);
+  if (!cv) return '';
+  return (await rec(cv, { digits: false, psm: psm || 7 })).replace(/\s+/g, ' ').trim();
+}
+
+/* rec(canvas,{psm}) -> text; recWords(canvas) -> [{t,x0,y0,x1,y1}] (only used to find the section titles) */
+async function readDabsImage(src, rec, recWords, rot, refYear, progress) {
+  var warnings = [];
+  var cv = await scaledCanvas(src, 2400, rot || 0);
+  var im = await loadImg(src);
+  var sc = cv.width / ((rot === 90 || rot === 270) ? im.naturalHeight : im.naturalWidth);
+  var minW = 22 * sc, minH = 8 * sc;
+  var gray = grayFromCanvas(cv);
+  var rgb = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height).data;
+  var isPink = function (c) {
+    var pk = 0, tn = 0;
+    for (var y = c.y0; y < c.y1; y += 2) for (var x = c.x0; x < c.x1; x += 2) {
+      var k = 4 * (y * cv.width + x), r = rgb[k], g = rgb[k + 1], b = rgb[k + 2];
+      if (Math.min(r, g, b) >= 140 && Math.max(r, g, b) - Math.min(r, g, b) >= 22) { tn++; if (r > g + 25) pk++; }
+    }
+    return tn > 0 && pk > 0.5 * tn;
+  };
+  var comps = splitAtLines(cv, tintComponents(cv).filter(function (c) { return c.x1 - c.x0 >= minW && c.y1 - c.y0 >= minH; })).filter(function (c) { return c.y1 - c.y0 >= minH; });
+  var words = await recWords(cv);
+  var sorted = words.slice().sort(function (a, b) { return (a.y0 + a.y1) - (b.y0 + b.y1); });
+  var lines = [];
+  sorted.forEach(function (w) {
+    var cy = (w.y0 + w.y1) / 2, ln = lines[lines.length - 1];
+    if (ln && Math.abs(cy - ln.cy) < 6 * sc) { ln.w.push(w); ln.cy = (ln.cy * (ln.w.length - 1) + cy) / ln.w.length; }
+    else lines.push({ cy: cy, w: [w] });
+  });
+  lines.forEach(function (l) { l.w.sort(function (a, b) { return a.x0 - b.x0; }); l.text = l.w.map(function (w) { return w.t; }).join(' '); });
+  var titles = lines.filter(function (l) { return /dabs/i.test(l.text) && /(support|spool)/i.test(l.text) && !/activity/i.test(l.text); })
+    .map(function (l) { return { y: l.cy, night: /added/i.test(l.text), kind: /spool/i.test(l.text) ? 'spool' : 'support', text: l.text }; });
+  if (!titles.length) warnings.push('No "DABS Support / Spool" titles were read in the picture.');
+  var night = '';
+  titles.forEach(function (t) { if (!night) night = detectNight(t.text, refYear); });
+  /* the real status cells are the widest coloured blocks; small blobs are coloured text */
+  var wmax = comps.reduce(function (m, c) { return Math.max(m, c.x1 - c.x0); }, 0);
+  comps.forEach(function (c) { c.pink = isPink(c); });
+  comps = comps.filter(function (c) { return c.x1 - c.x0 >= 0.7 * wmax && c.y1 - c.y0 >= 11 * sc; });
+  comps.sort(function (a, b) { return a.y0 - b.y0 || a.x0 - b.x0; });
+  var firstStatusX = comps.reduce(function (m, c) { return Math.min(m, c.x0); }, 1e9);
+  var jobs = [], skipped = 0;
+  for (var ci = 0; ci < comps.length; ci++) {
+    var c = comps[ci];
+    if (progress) progress(ci + 1, comps.length);
+    var mid = (c.y0 + c.y1) >> 1, pad = Math.max(2, Math.round(2 * sc));
+    var y0 = c.y0 + pad, y1 = c.y1 - pad;
+    var st = await readCell(gray, c.x0 + pad, y0, c.x1 - pad, y1, rec, 6, 170);
+    var status = c.pink ? STATUS.NOTDONE : statusFromText(st);
+    if (!status) { skipped++; continue; }
+    var vl = verticalLines(gray, y0, y1);
+    var near = function (x) { return vl.filter(function (v) { return Math.abs(v - x) < 6 * sc; })[0]; };
+    var actR = near(firstStatusX) != null ? near(firstStatusX) : firstStatusX;
+    var left = vl.filter(function (v) { return v < actR - 20 * sc; });
+    var actL = left.length ? left[left.length - 1] : 0;
+    var tagL = left.length > 1 ? left[left.length - 2] : actL;
+    var rightLines = vl.filter(function (v) { return v > c.x1; });
+    var remL = rightLines.length >= 2 ? rightLines[rightLines.length - 2] : c.x1;
+    var remR = rightLines.length ? rightLines[rightLines.length - 1] : gray.w - 2;
+    var act = await readCell(gray, actL + 4, y0, actR - 3, y1, rec, 6, 160);
+    var tag = await readCell(gray, tagL + 4, y0, actL - 3, y1, rec, 6, 160);
+    var remark = await readCell(gray, remL + 4, y0, remR - 3, y1, rec, 6, 160);
+    var title = null;
+    titles.forEach(function (t) { if (t.y < c.y0) title = t; });
+    var job = { kind: title ? title.kind : 'support', night: title ? title.night : false, level: '', tag: tag, act: act, status: status, remark: remark };
+    job.cat = classifyActivity(job);
+    jobs.push(job);
+  }
+  if (skipped) warnings.push(skipped + ' coloured cell(s) in the picture could not be read as DONE / ONGOING / NOT DONE.');
+  if (jobs.length) warnings.push('Jobs were counted from a picture, not from the Excel file. Check the counts on the Review screen.');
+  return { jobs: jobs, night: night, warnings: warnings };
+}
+
 /* ---------- App: state, Google Drive, screens ---------- */
 var SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file';
 var ROOT_NAME = 'Night Report';
@@ -737,6 +995,11 @@ async function sheetBlobToText(blob) {
   return rows.map(function (r) { return r.filter(function (c) { return String(c).trim() !== ''; }).join(' '); }).join('\n');
 }
 
+async function rotatedUrl(url, rot) {
+  var cv = await scaledCanvas(url, 1800, rot);
+  return cv.toDataURL('image/jpeg', 0.85);
+}
+
 async function pullNight(night, say) {
   var st = freshState();
   st.date = night.iso;
@@ -756,13 +1019,27 @@ async function pullNight(night, say) {
     } else items.push({ id: f.id, name: f.name, mimeType: f.mimeType, parentKind: '' });
   }
   items.forEach(function (it) { it.role = classifyFile(it.name, it.mimeType, it.parentKind); });
+  /* Pictures with no clue in their name are read and sorted by what is on them */
+  var loose = items.filter(function (it) { return it.role === 'image'; });
+  for (var q = 0; q < loose.length; q++) {
+    var it = loose[q];
+    it.role = 'photo-work';
+    if (!window.Tesseract) { if (!q) warn('The picture reader did not load, so pictures were all treated as photos. Check your internet connection and reload.'); continue; }
+    try {
+      say('Looking at picture ' + (q + 1) + ' of ' + loose.length + ' (' + it.name + ')…');
+      var u = await blobToDataUrl(await downloadBlob(it));
+      var cl = await classifyImage(u, tessPage);
+      it.rot = cl.rot;
+      it.role = cl.kind === 'headcount' ? 'headcount-img' : cl.kind === 'dabs' ? 'dabs-img' : cl.kind === 'welder' ? 'welder-img' : 'photo-work';
+    } catch (e) { warn('Could not look at ' + it.name + ': ' + e.message); }
+  }
   var by = function (role) { return items.filter(function (it) { return it.role === role; }).sort(function (a, b) { return a.name < b.name ? -1 : 1; }); };
 
   /* DABS */
   var dabsFiles = by('dabs').sort(function (a, b) { return (/dabs/i.test(b.name) ? 1 : 0) - (/dabs/i.test(a.name) ? 1 : 0); }).slice(0, 3);
   var dabs = null;
   if (!window.XLSX) warn('The Excel reader did not load. Check your internet connection and reload.');
-  else if (!dabsFiles.length) warn('No DABS Excel file found in the folder.');
+  else if (!dabsFiles.length) { if (!by('dabs-img').length && !items.some(function (x) { return x.role === 'image'; })) warn('No DABS Excel file found in the folder.'); }
   else {
     for (var d = 0; d < dabsFiles.length; d++) {
       say('Reading DABS ' + dabsFiles[d].name + '…');
@@ -779,6 +1056,20 @@ async function pullNight(night, say) {
     } else if (dabsFiles.length) warn('No jobs with a DONE / ONGOING / NOT DONE status were found in the DABS file.');
   }
 
+  /* DABS as a picture (screenshot), only when no Excel was readable */
+  var dabsImg = by('dabs-img')[0];
+  if (!st.dabs.jobs.length && dabsImg && window.Tesseract) {
+    try {
+      say('Reading DABS picture ' + dabsImg.name + '…');
+      var du = await blobToDataUrl(await downloadBlob(dabsImg));
+      var dr = await readDabsImage(du, tessRec, tessWords, dabsImg.rot || 0, undefined, function (a, n) { say('Reading DABS picture, job ' + a + ' of ' + n + '…'); });
+      if (dr.jobs.length) {
+        st.dabs = { file: dabsImg.name + ' (picture)', jobs: dr.jobs, warnings: dr.warnings };
+        st.src.dabsFile = dabsImg.name + ' (picture)';
+        dr.warnings.forEach(warn);
+      } else warn('The DABS picture ' + dabsImg.name + ' was found but no jobs could be read from it.');
+    } catch (e) { warn('Could not read the DABS picture: ' + e.message); }
+  }
   /* Headcount */
   var hcText = by('headcount-text')[0], hcImg = by('headcount-img')[0], hcRes = null;
   if (hcText) {
@@ -797,6 +1088,7 @@ async function pullNight(night, say) {
     try {
       var ib = await downloadBlob(hcImg);
       var url = await blobToDataUrl(ib);
+      if (hcImg.rot) url = await rotatedUrl(url, hcImg.rot);
       st.src.hcImg = url;
       if (!window.Tesseract) warn('The picture reader did not load. Enter the headcount below, or upload headcount as a .txt or Excel file.');
       else {
@@ -815,11 +1107,11 @@ async function pullNight(night, say) {
     st.src.hcSource = dabs.name + ' (table under the report)';
     st.src.hcCheck = { total: dabs.res.headcount.total, sum: sumCounts(st.headcount), ok: dabs.res.headcount.total == null || dabs.res.headcount.total === sumCounts(st.headcount), note: '' };
   }
-  if (!st.src.hcSource && !hcText && !hcImg) warn('No headcount file found (name it "headcount…").');
+  if (!st.src.hcSource && !hcText && !hcImg) warn('No headcount table was found in the folder (a picture of the table, or a .txt / Excel file).');
 
   /* Welding sheet picture (for reference while entering counts) */
   var wl = by('welder-img')[0];
-  if (wl) { try { st.src.welderImg = await compressImage(await downloadBlob(wl)); } catch (e) { warn('Could not open the welding sheet picture.'); } }
+  if (wl) { try { var wu = await compressImage(await downloadBlob(wl)); st.src.welderImg = wl.rot ? await rotatedUrl(wu, wl.rot) : wu; } catch (e) { warn('Could not open the welding sheet picture.'); } }
 
   /* Photos */
   var ph = by('photo-work').concat(by('photo-blocker')).sort(function (a, b) { return a.name < b.name ? -1 : 1; });
