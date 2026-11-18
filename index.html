@@ -29,7 +29,7 @@ button.pri{background:#1f3864;border-color:#1f3864;color:#fff}
 .acts{margin:6px 0 0;padding-left:18px;color:#444;font-size:13px}
 .hcrow{display:grid;grid-template-columns:1fr 84px 38px;gap:6px;margin-top:6px}
 .hcrow input{margin:0}.hcrow button,.conrow button,.phrow>button{padding:6px 0}
-.conrow{display:grid;grid-template-columns:104px 1fr 38px;gap:6px;margin:6px 0}.conrow input,.conrow select{margin:0}
+.conrow{display:grid;grid-template-columns:1fr 38px;gap:6px;margin:6px 0}.conrow input,.conrow select{margin:0}
 .grid5{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px}
 .phrow{display:grid;grid-template-columns:72px 1fr 38px;gap:8px;margin-top:10px;align-items:start}
 .phrow img{width:72px;height:72px;object-fit:cover;border-radius:8px}.phrow select,.phrow input{margin:0 0 6px}
@@ -389,9 +389,17 @@ function headcountTable(rows) {
     rows.map(function (r) { return '<td>' + (parseInt(r.count, 10) || 0) + '</td>'; }).join('') + '<td class="tot">' + total + '</td></tr></table>';
 }
 
-function welderTable(w) {
+/* welders: [{name,count}] (older saves: {ws,wsp,fs,fsp,ch}) */
+function welderList(w) {
+  if (Array.isArray(w)) return w;
   w = w || {};
-  var cols = [['Welding support', w.ws], ['Welding spool', w.wsp], ['Fit-up support', w.fs], ['Fit-up spool', w.fsp], ['CH', w.ch]];
+  return [['Welding support', w.ws], ['Welding spool', w.wsp], ['Fit-up support', w.fs], ['Fit-up spool', w.fsp], ['CH', w.ch]]
+    .filter(function (x) { return parseInt(x[1], 10) > 0; }).map(function (x) { return { name: x[0], count: parseInt(x[1], 10) }; });
+}
+
+function welderTable(w) {
+  var cols = welderList(w).filter(function (x) { return String(x.name || '').trim() && !/^(off|vacation|holiday|leave|sick)$/i.test(String(x.name).trim()); }).map(function (x) { return [esc(x.name), x.count]; });
+  if (!cols.length) return '<div style="color:#888">No welder numbers entered</div>';
   var tot = cols.reduce(function (s, c) { return s + (parseInt(c[1], 10) || 0); }, 0);
   return '<table class="t"><tr>' + cols.map(function (c) { return '<th>' + c[0] + '</th>'; }).join('') + '<th class="tot">TOTAL</th></tr><tr>' +
     cols.map(function (c) { return '<td>' + (parseInt(c[1], 10) || 0) + '</td>'; }).join('') + '<td class="tot">' + tot + '</td></tr></table>';
@@ -432,7 +440,7 @@ function buildReportPages(d, history) {
   var concerns = (d.concerns || []).filter(function (c) { return (c.text || '').trim(); });
 
   var conHtml = concerns.length
-    ? '<div class="con"><b>Concerns</b><br>' + concerns.map(function (c) { return esc(c.trade) + ': ' + esc(c.text); }).join('<br>') + '</div>'
+    ? '<div class="con"><b>Concerns</b><br>' + '<ul style="margin:4px 0 0 16px;padding:0">' + concerns.map(function (c) { return '<li>' + esc(c.text) + '</li>'; }).join('') + '</ul>' + '</div>'
     : '<div class="con" style="background:#f3f7f3;border-color:#cfe3d2"><b style="color:#2e7d4a">Concerns</b><br>None reported</div>';
 
   var main = '<div class="rp">' + pageHeader(d) +
@@ -644,8 +652,50 @@ function scaledCanvas(src, maxW, rot) {
   });
 }
 
-/* Looks at the whole picture and returns {kind, rot}. kind: headcount | dabs | welder | photo */
-async function classifyImage(src, rec) {
+/* A screenshot of a picture (WhatsApp, Drive viewer) has dark bars round it: keep only the light page */
+async function cropToPage(src) {
+  var im = await loadImg(src), W = im.naturalWidth, H = im.naturalHeight;
+  var f = Math.min(1, 400 / Math.max(W, H)), w = Math.max(8, Math.round(W * f)), h = Math.max(8, Math.round(H * f));
+  var c = document.createElement('canvas'); c.width = w; c.height = h;
+  var x = c.getContext('2d'); x.drawImage(im, 0, 0, w, h);
+  var d = x.getImageData(0, 0, w, h).data;
+  var light = function (i) { var r = d[4 * i], g = d[4 * i + 1], b = d[4 * i + 2]; return Math.min(r, g, b) > 200; };
+  var rows = [], cols = new Array(w).fill(0);
+  for (var yy = 0; yy < h; yy++) { var n = 0; for (var xx = 0; xx < w; xx++) if (light(yy * w + xx)) { n++; cols[xx]++; } rows.push(n / w); }
+  /* longest stretch of light lines, short dark breaks (table header, lines) allowed */
+  var runs = function (arr, th) {
+    var gap = Math.max(3, Math.round(arr.length * 0.1)), best = null, s0 = -1, last = -1;
+    for (var i = 0; i <= arr.length; i++) {
+      var on = i < arr.length && arr[i] > th;
+      if (on) { if (s0 < 0) s0 = i; last = i; }
+      else if (s0 >= 0 && (i - last > gap || i === arr.length)) { if (!best || last + 1 - s0 > best[1] - best[0]) best = [s0, last + 1]; s0 = -1; }
+    }
+    return best;
+  };
+  var ry = runs(rows, 0.3);
+  if (!ry) return src;
+  var cc = new Array(w).fill(0);
+  for (var y2 = ry[0]; y2 < ry[1]; y2++) for (var x2 = 0; x2 < w; x2++) if (light(y2 * w + x2)) cc[x2]++;
+  var rx = runs(cc.map(function (v) { return v / (ry[1] - ry[0]); }), 0.3);
+  if (!rx) return src;
+  var area = (rx[1] - rx[0]) * (ry[1] - ry[0]) / (w * h);
+  if (area > 0.92 || area < 0.08) return src;
+  var X0 = Math.floor(rx[0] / f), Y0 = Math.floor(ry[0] / f), X1 = Math.min(W, Math.ceil(rx[1] / f)), Y1 = Math.min(H, Math.ceil(ry[1] / f));
+  var o = document.createElement('canvas'); o.width = X1 - X0; o.height = Y1 - Y0;
+  var ox = o.getContext('2d'); ox.fillStyle = '#fff'; ox.fillRect(0, 0, o.width, o.height);
+  ox.drawImage(im, X0, Y0, o.width, o.height, 0, 0, o.width, o.height);
+  return o.toDataURL('image/png');
+}
+
+/* Looks at the whole picture and returns {kind, rot, src} (src = the picture with dark bars cut off). kind: headcount | dabs | welder | photo */
+async function classifyImage(src0, rec) {
+  var src = await cropToPage(src0);
+  var r = await classifyImageInner(src, rec);
+  r.src = r.kind === 'photo' ? src0 : src;
+  return r;
+}
+
+async function classifyImageInner(src, rec) {
   if (!(await looksLikeDocument(src))) return { kind: 'photo', rot: 0 };
   var rots = [0, 90, 270];
   for (var i = 0; i < rots.length; i++) {
@@ -825,6 +875,11 @@ function weldTokKind(t) {
   if (!s) return '';
   var u = s.toUpperCase();
   if (/CHARG|HARGE|EHAND/.test(u)) return 'ch';
+  if (/^(OFF|VACATION|VACATON|HOLIDAY|LEAVE|SICK|ABSENT|ANNUAL)$/.test(u) || /VACAT|HOLID/.test(u)) return 'off';
+  if (/^\(.*\)$/.test(String(t).trim())) return '';
+  if (/^FW$|^F\/W$|FIREWAT|FIRE$/.test(u)) return 'fw';
+  if (/^TEST|^TES7|^BENDTEST/.test(u)) return 'test';
+  if (/STORE|STOR3|CONSUM/.test(u)) return 'store';
   if (/^(F[I1L!T]{1,2}T?|FIR|FT|FTT)$/.test(u) || /^F[I1]T/.test(u)) return 'fit';
   if (/^U[PB]$/.test(u)) return 'up';
   if (u.length >= 4 && /PP|POR|ORT|PRT|UPO/.test(u)) return 'support';
@@ -879,10 +934,23 @@ function scaleCanvas(cv, f) {
   return c;
 }
 
-/* rec(canvas,{psm}) -> text; recWords(canvas) -> words with boxes. Returns {ws,wsp,fs,fsp,ch,found} */
+/* Returns {found, list:[{name,count}]} */
 async function readWelderSheet(src, rec, recWords, rot) {
   var cv = await scaledCanvas(src, 2400, rot || 0), W = cv.width, H = cv.height;
-  var results = [], ch = 0, col = null;
+  var results = [], ch = 0, col = null, extra = { fw: 0, test: 0, store: 0 };
+  var countExtra = function (ws, y1) {
+    var e = { fw: 0, test: 0, store: 0 }, lastStore = null;
+    ws.forEach(function (w) {
+      if (y1 != null && w.y0 > y1) return;
+      var k = weldTokKind(w.t);
+      if (k === 'store') { /* "CONSUMABLE STORE" on one line is one welder */
+        if (lastStore && Math.abs(lastStore.y0 - w.y0) < (w.y1 - w.y0)) return;
+        lastStore = w;
+      }
+      if (e[k] != null) e[k]++;
+    });
+    Object.keys(e).forEach(function (k) { extra[k] = Math.max(extra[k], e[k]); });
+  };
   var facs = [1, 1.4];
   for (var i = 0; i < facs.length; i++) {
     var c = facs[i] === 1 ? cv : scaleCanvas(cv, facs[i]);
@@ -890,6 +958,7 @@ async function readWelderSheet(src, rec, recWords, rot) {
     ch = Math.max(ch, words.filter(function (w) { return weldTokKind(w.t) === 'ch'; }).length);
     var dc = dutyColumn(words, c.width);
     if (!dc) continue;
+    countExtra(words, dc.y1 + c.height * 0.04);
     if (!col) col = { x0: dc.x0 / facs[i], x1: dc.x1 / facs[i], y0: dc.y0 / facs[i], y1: dc.y1 / facs[i] };
     results.push(countWeldPairs(dc.words.map(function (w) { return w.t; })));
   }
@@ -906,11 +975,13 @@ async function readWelderSheet(src, rec, recWords, rot) {
       results.push(countWeldPairs(txt.split(/\s+/)));
     }
   }
-  if (!results.length) return { found: false, ws: 0, wsp: 0, fs: 0, fsp: 0, ch: Math.min(ch, 3) };
+  if (!results.length) return { found: false, list: [] };
   /* each pass tends to miss words rather than invent them, so the highest count per duty is kept */
   var r = { ws: 0, wsp: 0, fs: 0, fsp: 0, pairs: 0 };
   results.forEach(function (x) { ['ws', 'wsp', 'fs', 'fsp', 'pairs'].forEach(function (k) { r[k] = Math.max(r[k], x[k]); }); });
-  return { found: r.pairs > 0, ws: r.ws, wsp: r.wsp, fs: r.fs, fsp: r.fsp, ch: Math.min(ch, 3), all: results };
+  var list = [['Welding support', r.ws], ['Welding spool', r.wsp], ['Fit-up support', r.fs], ['Fit-up spool', r.fsp], ['FW', extra.fw], ['Test', extra.test], ['Store', extra.store], ['CH', Math.min(ch, 3)]]
+    .filter(function (x) { return x[1] > 0; }).map(function (x) { return { name: x[0], count: x[1] }; });
+  return { found: r.pairs > 0, list: list, ch: Math.min(ch, 3), all: results };
 }
 
 /* ---------- App: state, Google Drive, screens ---------- */
@@ -928,7 +999,7 @@ function freshState() {
     date: '',
     dabs: { file: '', jobs: [], warnings: [] },
     headcount: DEFAULT_TRADES.map(function (n) { return { name: n, count: 0 }; }),
-    welders: { ws: 0, wsp: 0, fs: 0, fsp: 0, ch: 0 },
+    welders: [],
     concerns: [],
     photos: [],
     removedPhotoIds: [],
@@ -1221,13 +1292,13 @@ async function pullNight(night, say) {
       say('Looking at picture ' + (q + 1) + ' of ' + loose.length + ' (' + it.name + ')…');
       var u = await blobToDataUrl(await downloadBlob(it));
       var cl = await classifyImage(u, tessPage);
-      it.rot = cl.rot;
+      it.rot = cl.rot; if (cl.kind !== 'photo') it.url = cl.src;
       it.role = cl.kind === 'headcount' ? 'headcount-img' : cl.kind === 'dabs' ? 'dabs-img' : cl.kind === 'welder' ? 'welder-img' : 'photo-work';
     } catch (e) { warn('Could not look at ' + it.name + ': ' + e.message); }
   }
   st.src.files = items.map(function (it) { return { name: it.name, role: it.role }; });
   /* image source of an item: a rendered PDF page or the picture itself */
-  var itemUrl = async function (it) { return it.pages ? it.pages[0] : await blobToDataUrl(await downloadBlob(it)); };
+  var itemUrl = async function (it) { return it.url || (it.pages ? it.pages[0] : await blobToDataUrl(await downloadBlob(it))); };
   var by = function (role) { return items.filter(function (it) { return it.role === role; }).sort(function (a, b) { return a.name < b.name ? -1 : 1; }); };
 
   /* DABS */
@@ -1256,7 +1327,7 @@ async function pullNight(night, say) {
   if (!st.dabs.jobs.length && dabsImg && window.Tesseract) {
     try {
       say('Reading DABS picture ' + dabsImg.name + '…');
-      var srcs = dabsImg.pages ? dabsImg.pages : [await blobToDataUrl(await downloadBlob(dabsImg))];
+      var srcs = dabsImg.pages ? dabsImg.pages : [await itemUrl(dabsImg)];
       var dr = { jobs: [], warnings: [] }, lastTitle = null;
       for (var pg = 0; pg < srcs.length; pg++) {
         var one = await readDabsImage(srcs[pg], tessRec, tessWords, dabsImg.rot || 0, undefined, function (a, n) { say('Reading DABS' + (srcs.length > 1 ? ' page ' + (pg + 1) : '') + ', job ' + a + ' of ' + n + '…'); }, lastTitle);
@@ -1313,10 +1384,10 @@ async function pullNight(night, say) {
   if (wl && window.Tesseract) {
     try {
       say('Counting welders on the welding sheet…');
-      var wsrc = wl.pages ? wl.pages[0] : await blobToDataUrl(await downloadBlob(wl));
+      var wsrc = await itemUrl(wl);
       var wr = await readWelderSheet(wsrc, tessRec, tessWords, wl.rot || 0);
       if (wr.found) {
-        st.welders = { ws: wr.ws, wsp: wr.wsp, fs: wr.fs, fsp: wr.fsp, ch: wr.ch };
+        st.welders = wr.list;
         st.src.welderAuto = true;
         if (!wr.ch) warn('CH could not be read on the welding sheet. Enter it in step 2.');
       } else warn('The welder numbers could not be read from the welding sheet. Enter them in step 2.');
@@ -1406,7 +1477,7 @@ async function loadNight(entry) {
   S.date = d.date;
   S.dabs = d.dabs || S.dabs;
   S.headcount = d.headcount || S.headcount;
-  S.welders = d.welders || S.welders;
+  S.welders = welderList(d.welders || []);
   S.concerns = d.concerns || [];
   S.photos = photos;
 }
@@ -1502,11 +1573,8 @@ function viewEdit() {
   var h = fromDriveCard();
   h += '<div class="card"><b>1. Headcount</b><div id="hcRows">' + hcRowsHtml() + '</div><div class="btns"><button onclick="A.hcAdd()">Add row</button></div></div>';
 
-  var w = S.welders;
-  h += '<div class="card"><b>2. Welder distribution</b>' + (S.src && S.src.welderAuto ? '<p class="badmsg">Filled from the handwritten welding sheet. Check each number against the sheet above.</p>' : '') + '<div class="grid5">' +
-    [['ws', 'Welding support'], ['wsp', 'Welding spool'], ['fs', 'Fit-up support'], ['fsp', 'Fit-up spool'], ['ch', 'CH']].map(function (f) {
-      return '<label>' + f[1] + '<input type="number" min="0" inputmode="numeric" value="' + (w[f[0]] || 0) + '" oninput="A.setWelder(\'' + f[0] + '\',this.value)"></label>';
-    }).join('') + '</div></div>';
+  h += '<div class="card"><b>2. Welder distribution</b>' + (S.src && S.src.welderAuto ? '<p class="badmsg">Filled from the handwritten welding sheet. Check each number against the sheet above.</p>' : '') +
+    '<p class="muted">One line per duty, as written on the sheet. Welders who are off or on vacation are not counted.</p><div id="wlRows">' + welderRowsHtml() + '</div><div class="btns"><button onclick="A.wlAdd()">Add duty</button></div></div>';
 
   h += '<div class="card"><b>3. Concerns</b><p class="muted">Taken from the DABS file when it has a concern list. Edit or add as needed.</p><div id="conRows">' + concernRowsHtml() + '</div><button onclick="A.conAdd()">Add concern</button></div>';
 
@@ -1514,6 +1582,12 @@ function viewEdit() {
 
   h += '<div class="bar"><button class="pri" onclick="A.preview()">Preview report</button></div>';
   return h;
+}
+
+function welderRowsHtml() {
+  return S.welders.map(function (r, i) {
+    return '<div class="hcrow"><input value="' + esc(r.name) + '" placeholder="Duty" list="dutyList" oninput="A.wlName(' + i + ',this.value)"><input type="number" min="0" inputmode="numeric" value="' + (r.count || 0) + '" oninput="A.wlCount(' + i + ',this.value)"><button onclick="A.wlDel(' + i + ')">×</button></div>';
+  }).join('') + '<datalist id="dutyList"><option>Welding support<option>Welding spool<option>Fit-up support<option>Fit-up spool<option>FW<option>Test<option>Store<option>CH</datalist>';
 }
 
 function hcRowsHtml() {
@@ -1524,8 +1598,7 @@ function hcRowsHtml() {
 
 function concernRowsHtml() {
   return S.concerns.map(function (c, i) {
-    return '<div class="conrow"><select onchange="A.conTrade(' + i + ',this.value)">' + CONCERN_TRADES.map(function (t) { return '<option' + (t === c.trade ? ' selected' : '') + '>' + t + '</option>'; }).join('') + '</select>' +
-      '<input value="' + esc(c.text) + '" placeholder="Concern" oninput="A.conText(' + i + ',this.value)"><button aria-label="Remove concern" onclick="A.conDel(' + i + ')">×</button></div>';
+    return '<div class="conrow"><input value="' + esc(c.text) + '" placeholder="Concern" oninput="A.conText(' + i + ',this.value)"><button aria-label="Remove concern" onclick="A.conDel(' + i + ')">×</button></div>';
   }).join('');
 }
 
@@ -1639,7 +1712,10 @@ var A = {
   hcDel: function (i) { S.headcount.splice(i, 1); render(); },
   hcAdd: function () { S.headcount.push({ name: '', count: 0 }); render(); },
 
-  setWelder: function (k, v) { S.welders[k] = parseInt(v, 10) || 0; },
+  wlName: function (i, v) { S.welders[i].name = v; },
+  wlCount: function (i, v) { S.welders[i].count = parseInt(v, 10) || 0; },
+  wlDel: function (i) { S.welders.splice(i, 1); document.getElementById('wlRows').innerHTML = welderRowsHtml(); },
+  wlAdd: function () { S.welders.push({ name: '', count: 0 }); document.getElementById('wlRows').innerHTML = welderRowsHtml(); },
 
   conAdd: function () { S.concerns.push({ trade: 'All', text: '' }); render(); },
   conTrade: function (i, v) { S.concerns[i].trade = v; },
@@ -1652,8 +1728,8 @@ var A = {
       if (!window.Tesseract) { render(); return; }
       withBusy('Counting welders on the welding sheet…', async function () {
         var best = null;
-        for (var r = 0; r < 3; r++) { var x = await readWelderSheet(p.url, tessRec, tessWords, [0, 270, 90][r]); if (x.found && (!best || x.ws + x.wsp + x.fs + x.fsp > best.ws + best.wsp + best.fs + best.fsp)) best = x; }
-        if (best) { S.welders = { ws: best.ws, wsp: best.wsp, fs: best.fs, fsp: best.fsp, ch: best.ch }; S.src.welderAuto = true; toast('Welder numbers filled in. Check them in step 2.'); }
+        for (var r = 0; r < 3; r++) { var x = await readWelderSheet(p.url, tessRec, tessWords, [0, 270, 90][r]); if (x.found && (!best || x.list.length > best.list.length)) best = x; }
+        if (best) { S.welders = best.list; S.src.welderAuto = true; toast('Welder numbers filled in. Check them in step 2.'); }
         else toast('The welder numbers could not be read. Enter them in step 2.');
       });
       return;
