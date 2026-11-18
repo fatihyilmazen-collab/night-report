@@ -811,7 +811,7 @@ async function readDabsImage(src, rec, recWords, rot, refYear, progress, prevTit
 
 /* ---------- App: state, Google Drive, screens ---------- */
 var SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file';
-var ROOT_NAME = 'Night Report';
+var ROOT_NAME = 'Night Report - Saved reports';
 var XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 var GSHEET_MIME = 'application/vnd.google-apps.spreadsheet';
 var FOLDER_MIME = 'application/vnd.google-apps.folder';
@@ -886,7 +886,7 @@ async function drive(path, opts) {
 function qname(n) { return String(n).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
 
 async function listFiles(q) {
-  var r = await drive('files?q=' + encodeURIComponent(q) + '&fields=files(id,name,mimeType)&pageSize=200');
+  var r = await drive('files?q=' + encodeURIComponent(q) + '&fields=files(id,name,mimeType,createdTime,modifiedTime)&pageSize=500');
   return (await r.json()).files || [];
 }
 async function listChildren(folderId) { return listFiles("trashed=false and '" + folderId + "' in parents"); }
@@ -924,11 +924,11 @@ function blobToDataUrl(b) {
 }
 
 async function ensureRoot() {
-  var id = localStorage.getItem('nr_root');
+  var id = localStorage.getItem('nr_root2');
   if (id) {
     try { var j = await (await drive('files/' + id + '?fields=id,trashed')).json(); if (j.trashed) id = null; } catch (e) { id = null; }
   }
-  if (!id) { id = await findOrCreateFolder(ROOT_NAME, null); localStorage.setItem('nr_root', id); }
+  if (!id) { id = await findOrCreateFolder(ROOT_NAME, null); localStorage.setItem('nr_root2', id); }
   return id;
 }
 
@@ -958,16 +958,36 @@ async function resolveInputRoot() {
 }
 
 /* Nights = sub-folders named with a date, plus loose files named with a date */
+/* Night a loose file belongs to, from when it was put in Drive: before 14:00 counts as the night before */
+function shiftNightOf(t) {
+  if (!t) return '';
+  var d = new Date(t);
+  if (isNaN(d)) return '';
+  if (d.getHours() < 14) d.setDate(d.getDate() - 1);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
 async function listNights() {
   var root = await resolveInputRoot();
   var kids = await listChildren(root), map = {};
   var yr = new Date().getFullYear();
+  var get = function (iso) { return map[iso] || (map[iso] = { iso: iso, folderId: null, name: '', files: [] }); };
   kids.forEach(function (k) {
-    var iso = parseDateName(k.name, yr);
-    if (!iso) return;
-    var n = map[iso] || (map[iso] = { iso: iso, folderId: null, name: '', files: [] });
-    if (k.mimeType === FOLDER_MIME) { n.folderId = k.id; n.name = k.name; }
-    else { n.files.push(k); if (!n.name) n.name = '(files in the main folder)'; }
+    if (k.mimeType === FOLDER_MIME) {
+      var iso = parseDateName(k.name, yr);
+      if (!iso) return;
+      var n = get(iso); n.folderId = k.id; n.name = k.name;
+      return;
+    }
+    if (/^(index|data)\.json$/i.test(k.name) || /^Night report \d{4}-\d{2}-\d{2}\.pdf$/.test(k.name)) return;
+    /* loose files in the main folder: grouped by the night they were uploaded */
+    var ni = shiftNightOf(k.createdTime || k.modifiedTime) || parseDateName(k.name, yr);
+    if (!ni) return;
+    get(ni).files.push(k);
+  });
+  Object.keys(map).forEach(function (k) {
+    var n = map[k];
+    if (n.files.length) n.name = n.folderId ? n.name + ' + ' + n.files.length + ' file(s) in the main folder' : n.files.length + ' file(s) in the main folder';
   });
   return Object.keys(map).sort().reverse().map(function (k) { return map[k]; });
 }
@@ -1049,7 +1069,7 @@ async function pullNight(night, say) {
   var warn = function (m) { st.src.warnings.push(m); };
 
   say('Looking in the Drive folder…');
-  var files = night.folderId ? await listChildren(night.folderId) : night.files.slice();
+  var files = (night.folderId ? await listChildren(night.folderId) : []).concat(night.files || []);
   var items = [];
   /* every file in the night folder and in its sub-folders (two levels down) */
   async function gather(list, kind, depth) {
