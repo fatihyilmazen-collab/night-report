@@ -1,0 +1,1187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Night Report</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f3f4f6;color:#1b1b1b;font:15px/1.45 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+header{position:sticky;top:0;z-index:5;background:#1f3864;color:#fff;display:flex;align-items:center;gap:10px;padding:12px 14px}
+header h1{font-size:17px;font-weight:600;margin:0;flex:1}
+header button{background:none;border:0;color:#fff;font-size:20px;padding:2px 8px;cursor:pointer}
+main{max-width:860px;margin:0 auto;padding:14px}
+.card{background:#fff;border:1px solid #e1e3e8;border-radius:10px;padding:14px;margin-bottom:12px}
+.card.warn{background:#fff8e1;border-color:#f0d58a}.card.err{background:#fdeeee;border-color:#e6a6a6;color:#a32525}
+.card b{font-weight:600}.card p{margin:6px 0}
+.muted{color:#6b7280;font-size:13px}
+label{display:block;font-size:13px;color:#4b5563;margin-top:10px}
+input,select,textarea{width:100%;font:inherit;padding:9px 10px;border:1px solid #cfd3da;border-radius:8px;background:#fff;margin-top:4px}
+input[type=file]{border:1px dashed #b5bbc6;background:#fafbfc}
+textarea{resize:vertical}
+button,.btn{font:inherit;padding:9px 14px;border:1px solid #cfd3da;background:#fff;border-radius:8px;cursor:pointer;color:#1b1b1b;text-decoration:none;display:inline-block}
+button.pri{background:#1f3864;border-color:#1f3864;color:#fff}
+.bar,.btns{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.item{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 0;border-top:1px solid #eceef2}
+.item:first-of-type{border-top:0}
+.chip{display:inline-block;font-size:12px;padding:1px 8px;border-radius:10px;margin:4px 6px 0 0;font-weight:600}
+.chip.d{background:#e3f4ea;color:#1d7a43}.chip.o{background:#fdf3d6;color:#8a5a00}.chip.n{background:#fbe4e4;color:#a32525}
+.acts{margin:6px 0 0;padding-left:18px;color:#444;font-size:13px}
+.hcrow{display:grid;grid-template-columns:1fr 84px 38px;gap:6px;margin-top:6px}
+.hcrow input{margin:0}.hcrow button,.conrow button,.phrow>button{padding:6px 0}
+.conrow{display:grid;grid-template-columns:104px 1fr 38px;gap:6px;margin:6px 0}.conrow input,.conrow select{margin:0}
+.grid5{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px}
+.phrow{display:grid;grid-template-columns:72px 1fr 38px;gap:8px;margin-top:10px;align-items:start}
+.phrow img{width:72px;height:72px;object-fit:cover;border-radius:8px}.phrow select,.phrow input{margin:0 0 6px}
+#pv{width:100%}.pvwrap{margin-bottom:14px;border:1px solid #cfd3da;background:#fff;overflow:hidden}
+.pvin{width:794px}
+#busy{position:fixed;inset:0;background:rgba(255,255,255,.8);display:none;align-items:center;justify-content:center;z-index:20;font-weight:600}
+#toast{position:fixed;left:12px;right:12px;bottom:14px;background:#1b1b1b;color:#fff;padding:11px 14px;border-radius:9px;display:none;z-index:30}
+.hcrow.unsure input{background:#fff3cd;border-color:#e6c200}
+.refimg{display:block;max-width:100%;max-height:200px;border:1px solid #e1e3e8;border-radius:6px;margin:6px 0 10px}
+.okmsg{color:#1d7a43;font-size:13px}.badmsg{color:#a32525;font-size:13px}
+.warnlist{margin:8px 0;padding-left:18px;color:#8a5a00;font-size:13px}
+
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+<header><button id="back" aria-label="Back" onclick="A.back()" style="display:none">&#8592;</button><h1 id="ttl">Night Report</h1><button id="gear" aria-label="Settings">&#9881;</button></header>
+<main id="main"></main>
+<div id="busy"><span id="busyMsg"></span></div>
+<div id="toast"></div>
+<script>
+/* ---------- Core logic (pure functions) ---------- */
+var STATUS = { DONE: 'DONE', ONGOING: 'ONGOING', NOTDONE: 'NOT DONE' };
+var ACT_ORDER = ['Support welding', 'Support erection', 'Spool welding', 'Spool erection', 'Fit-up', 'Cutting', 'Lifting', 'Other'];
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+function normStatus(v) {
+  var s = String(v == null ? '' : v).toUpperCase().replace(/[\s_\-]+/g, '');
+  if (s === 'DONE') return STATUS.DONE;
+  if (s === 'ONGOING') return STATUS.ONGOING;
+  if (s === 'NOTDONE') return STATUS.NOTDONE;
+  if (s === 'X') return STATUS.NOTDONE;
+  return '';
+}
+
+function classifyActivity(job) {
+  var a = (job.act || '').toLowerCase();
+  if (/fit[\s\-]?up/.test(a)) return 'Fit-up';
+  if (/\bcut/.test(a)) return 'Cutting';
+  if (/erect/.test(a)) return job.kind === 'spool' ? 'Spool erection' : 'Support erection';
+  if (/lift|load|pallet|crane|rigg|removal|transport|move/.test(a)) return 'Lifting';
+  if (/weld|grind|flush|repair/.test(a)) return job.kind === 'spool' ? 'Spool welding' : 'Support welding';
+  return 'Other';
+}
+
+function blockerCategory(remark) {
+  var m = /blocker\s*:\s*([^\-–—\n]*)/i.exec(remark || '');
+  if (!m) return null;
+  var t = m[1].trim().toLowerCase();
+  if (!t) return 'Other';
+  if (t.indexOf('manpower') === 0) return 'Manpower';
+  if (t.indexOf('time') === 0) return 'Time ran out';
+  if (t.indexOf('other') === 0) return 'Other';
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+var MONTHS = { JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5, JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11 };
+
+function detectNight(title, refYear) {
+  var m = /(\d{1,2})\s*(?:ST|ND|RD|TH)?[\s\-]*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)/i.exec(title || '');
+  if (!m) return '';
+  var d = parseInt(m[1], 10), mo = MONTHS[m[2].toUpperCase()];
+  var y = refYear || new Date().getFullYear();
+  return y + '-' + String(mo + 1).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+}
+
+/* rows: array of arrays (sheet_to_json header:1). Returns {jobs, night, warnings} */
+function parseDabs(rows, refYear) {
+  var section = null, cols = null, jobs = [], night = '', warnings = [], concerns = [], mode = '', hcLines = [];
+  for (var i = 0; i < rows.length; i++) {
+    var texts = (rows[i] || []).map(function (c) { return c == null ? '' : String(c).trim(); });
+    var joined = texts.join(' ').toUpperCase();
+    if (!joined.trim()) continue;
+    var isHeader = joined.indexOf('ACTIVITY DESCRIPTION') >= 0;
+    if (!isHeader && /DABS/.test(joined) && /(SUPPORT|SPOOL)/.test(joined)) {
+      mode = '';
+      var title = texts.filter(Boolean)[0] || '';
+      section = { night: /NIGHT\s*ADDED/.test(joined), kind: /SPOOL/.test(joined) ? 'spool' : 'support', title: title };
+      cols = null;
+      if (!night) night = detectNight(title, refYear);
+      continue;
+    }
+    if (!isHeader && /CONCERN/.test(joined) && !/DABS/.test(joined) && texts.filter(Boolean).length <= 2) { mode = 'concerns'; section = null; cols = null; continue; }
+    if (!isHeader && /HEAD\s?COUNT/.test(joined) && !/DABS/.test(joined) && texts.filter(Boolean).length <= 2) { mode = 'headcount'; section = null; cols = null; continue; }
+    if (mode === 'concerns') {
+      var cells = texts.filter(Boolean);
+      if (!cells.length || /^(NO\s+(OPEN\s+)?CONCERNS?|NONE|-)$/.test(cells.join(' ').toUpperCase().trim())) continue;
+      concerns.push(cellsToConcern(cells));
+      continue;
+    }
+    if (mode === 'headcount') { hcLines.push(texts.filter(Boolean).join(' ')); continue; }
+    if (isHeader) {
+      cols = { act: -1, tag: -1, level: -1, remark: -1, trades: [] };
+      texts.forEach(function (t, idx) {
+        var u = t.toUpperCase();
+        if (u.indexOf('ACTIVITY DESCRIPTION') >= 0) cols.act = idx;
+        else if (/TAG|MATERIAL/.test(u)) cols.tag = idx;
+        else if (/LEVEL/.test(u)) cols.level = idx;
+        else if (/REMARK|BLOCKER/.test(u)) cols.remark = idx;
+        else if (/PLAT|PIPING|LIFT|SCAFF|QC/.test(u)) cols.trades.push(idx);
+      });
+      continue;
+    }
+    if (!section || !cols) continue;
+    var act = texts[cols.act] || '';
+    var tag = cols.tag >= 0 ? texts[cols.tag] || '' : '';
+    if (!act && !tag) continue;
+    var status = '';
+    for (var k = 0; k < cols.trades.length && !status; k++) status = normStatus(texts[cols.trades[k]]);
+    if (!status) { warnings.push('No status for row ' + (i + 1) + ': ' + (tag || act)); continue; }
+    var job = {
+      kind: section.kind,
+      night: section.night,
+      level: cols.level >= 0 ? texts[cols.level] : '',
+      tag: tag,
+      act: act,
+      status: status,
+      remark: cols.remark >= 0 ? texts[cols.remark] : ''
+    };
+    job.cat = classifyActivity(job);
+    jobs.push(job);
+  }
+  var hc = hcLines.length ? parseHeadcount(hcLines.join('\n')) : null;
+  return { jobs: jobs, night: night, warnings: warnings, concerns: concerns, headcount: hc && hc.rows.length >= 3 ? hc : null };
+}
+
+var CONCERN_TRADE_WORDS = ['Plating', 'Piping', 'Lifting', 'Scaffolding', 'QC', 'All'];
+function cellsToConcern(cells) {
+  var trade = 'All', rest = [];
+  cells.forEach(function (c) {
+    var hit = CONCERN_TRADE_WORDS.filter(function (t) { return new RegExp('^' + t + '$', 'i').test(c.trim()); })[0];
+    if (hit && trade === 'All') { trade = hit; return; }
+    if (/^\d{1,2}[:\/.]\d{1,2}([:\/.]\d{2,4})?(\s+\d{1,2}:\d{2})?$/.test(c.trim())) return;
+    rest.push(c.trim());
+  });
+  return { trade: trade, text: rest.join(' \u2013 ') };
+}
+
+function mkIso(y, mo, d) {
+  y = parseInt(y, 10); mo = parseInt(mo, 10); d = parseInt(d, 10);
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return '';
+  return y + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+}
+
+/* Date written in a folder or file name (UK order dd-mm for numeric dates) */
+function parseDateName(name, refYear) {
+  var s = String(name || ''), m;
+  if ((m = /(?:^|\D)(20\d{2})[-._ \/](\d{1,2})[-._ \/](\d{1,2})(?!\d)/.exec(s))) return mkIso(m[1], m[2], m[3]);
+  if ((m = /(?:^|\D)(\d{1,2})[-._ \/](\d{1,2})[-._ \/](20\d{2}|\d{2})(?!\d)/.exec(s))) return mkIso(m[3].length === 2 ? '20' + m[3] : m[3], m[2], m[1]);
+  if ((m = /(\d{1,2})\s*(?:st|nd|rd|th)?[-._ ]*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[-._ ,]*(20\d{2})?/i.exec(s))) return mkIso(m[3] || refYear || new Date().getFullYear(), MONTHS[m[2].toUpperCase()] + 1, m[1]);
+  return '';
+}
+
+/* What a file in the night folder is for. parentKind: '' | 'work' | 'blocker' */
+function classifyFile(name, mime, parentKind) {
+  var n = String(name || '').toLowerCase(), mt = String(mime || '');
+  var isImg = /\.(jpe?g|png|webp)$/.test(n) || /^image\/(jpeg|png|webp)$/.test(mt);
+  var isHeic = /\.(heic|heif)$/.test(n) || /^image\/hei/.test(mt);
+  var isSheet = /\.(xlsx|xlsm|xls)$/.test(n) || /spreadsheet|ms-excel/.test(mt);
+  var isText = /\.(txt|csv)$/.test(n) || /^text\//.test(mt);
+  if (isHeic) return 'heic';
+  if (/head\s*-?\s*count|(^|[^a-z])hc([^a-z]|$)/.test(n)) return isImg ? 'headcount-img' : (isSheet || isText) ? 'headcount-text' : 'ignore';
+  if (isSheet) return 'dabs';
+  if (isImg && /weld|kaynak/.test(n)) return 'welder-img';
+  if (isImg && /dabs/.test(n)) return 'ignore';
+  if (isImg) return (parentKind === 'blocker' || /block/.test(n)) ? 'photo-blocker' : 'photo-work';
+  return 'ignore';
+}
+
+function photoCaption(name) {
+  return String(name || '').replace(/\.[a-z0-9]+$/i, '').replace(/^(blockers?|work|photo)[\s_\-]*/i, '').replace(/[_]+/g, ' ').trim();
+}
+
+function calcSummary(jobs) {
+  var r = { total: 0, done: 0, ongoing: 0, notdone: 0, acts: {}, blockers: {}, night: { total: 0, done: 0, ongoing: 0, notdone: 0 } };
+  (jobs || []).forEach(function (j) {
+    r.total++;
+    var key = j.status === STATUS.DONE ? 'done' : j.status === STATUS.ONGOING ? 'ongoing' : 'notdone';
+    r[key]++;
+    if (j.night) { r.night.total++; r.night[key]++; }
+    var a = r.acts[j.cat] || (r.acts[j.cat] = { done: 0, ongoing: 0, notdone: 0 });
+    a[key]++;
+    var b = blockerCategory(j.remark);
+    if (b) r.blockers[b] = (r.blockers[b] || 0) + 1;
+  });
+  return r;
+}
+
+/* Headcount text: lines like "Rigger Chargehand 5", "| Plater | 15 |", "Staff: 7" */
+function abbrevTrade(name) {
+  var n = String(name || '').replace(/\s+/g, ' ').trim();
+  n = n.replace(/chargehands?/ig, 'CH');
+  n = n.replace(/fire watcher\s*\/\s*general operative/i, 'FW / Gen Op');
+  n = n.replace(/materials controller/i, 'Mat. Controller');
+  return n;
+}
+
+function parseHeadcount(text) {
+  var rows = [], total = null;
+  String(text || '').split(/\r?\n/).forEach(function (line) {
+    var l = line.replace(/\|/g, ' ').replace(/\t/g, '  ').trim();
+    if (!l) return;
+    var m = /^(.*?)[\s:]+(\d+)\s*$/.exec(l);
+    if (!m) return;
+    var name = m[1].trim();
+    if (!name || /^-+$/.test(name)) return;
+    if (/^(trade|count)$/i.test(name)) return;
+    if (/^total$/i.test(name)) { total = parseInt(m[2], 10); return; }
+    rows.push({ name: abbrevTrade(name), count: parseInt(m[2], 10) });
+  });
+  return { rows: rows, total: total };
+}
+
+function sumCounts(rows) {
+  return (rows || []).reduce(function (s, r) { return s + (parseInt(r.count, 10) || 0); }, 0);
+}
+
+function fmtNight(iso) {
+  if (!iso) return '';
+  var p = iso.split('-');
+  if (p.length < 3) return iso;
+  var mn = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return parseInt(p[2], 10) + ' ' + mn[parseInt(p[1], 10) - 1] + ' ' + p[0];
+}
+
+function shortDate(iso) {
+  var p = (iso || '').split('-');
+  return p.length < 3 ? iso : p[2] + '/' + p[1];
+}
+
+
+/* ---------- Report layout (A4 portrait, 794 x 1123 px) ---------- */
+var C_DONE = '#2e9e5b', C_ONG = '#e8a317', C_NOT = '#d64545';
+
+var REPORT_CSS = [
+  '.rp{box-sizing:border-box;width:794px;height:1123px;padding:34px 38px;background:#fff;color:#1b1b1b;font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:12px;position:relative;overflow:hidden}',
+  '.rp *{box-sizing:border-box}',
+  '.rp .hd{display:flex;justify-content:space-between;align-items:baseline;border-bottom:1px solid #d8d8d8;padding-bottom:8px;margin-bottom:14px}',
+  '.rp .hd b{font-size:20px;font-weight:600}.rp .hd span{color:#666}',
+  '.rp .sec{margin-bottom:20px}',
+  '.rp .h{font-size:13px;font-weight:600;margin:0 0 6px}',
+  '.rp .kpi{display:grid;grid-template-columns:repeat(4,1fr) 100px 1.35fr;gap:9px;align-items:center}',
+  '.rp .tile{border-radius:7px;padding:8px 10px}.rp .tile i{display:block;font-style:normal;font-size:11px}.rp .tile b{font-size:24px;font-weight:600}',
+  '.rp table.t{width:100%;table-layout:fixed;border-collapse:collapse;text-align:center}',
+  '.rp table.t th{background:#1f3864;color:#fff;font-weight:600;font-size:10.5px;padding:5px 2px;border:1px solid #1b2f55;line-height:1.2}',
+  '.rp table.t td{border:1px solid #bdbdbd;padding:7px 2px;font-size:15px;font-weight:600}',
+  '.rp table.t .tot{background:#fff2c2}.rp table.t th.tot{background:#f2c94c;color:#3b2d00}',
+  '.rp .row{display:grid;grid-template-columns:104px 1fr 50px;gap:8px;align-items:center;margin-bottom:7px}',
+  '.rp .bar{display:flex;gap:2px;height:18px;border-radius:4px;overflow:hidden}',
+  '.rp .bar div{display:flex;align-items:center;justify-content:center;color:#fff;font-weight:600;font-size:11px}',
+  '.rp .two{display:grid;grid-template-columns:1.4fr 1fr;gap:18px}',
+  '.rp .con{border:1px solid #e6a6a6;background:#fdeeee;border-radius:7px;padding:10px 12px;line-height:1.6;align-self:start}',
+  '.rp .con b{color:#a32525}',
+  '.rp .photos{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}',
+  '.rp .ph{height:195px;border-radius:7px;background:#f0f0f0 center/cover no-repeat}',
+  '.rp .cap{font-size:11px;color:#555;margin-top:3px;line-height:1.3}',
+  '.rp .leg{display:flex;gap:14px;color:#555;font-size:11px;margin-top:4px}',
+  '.rp .leg i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px}',
+  '.rp .pf{position:absolute;left:38px;right:38px;bottom:16px;display:flex;justify-content:space-between;color:#999;font-size:10px}'
+].join('\n');
+
+function donutSvg(s) {
+  var tot = s.total || 1, circ = 251.33, off = 0, parts = '';
+  [['done', C_DONE], ['ongoing', C_ONG], ['notdone', C_NOT]].forEach(function (p) {
+    var len = s[p[0]] / tot * circ;
+    if (len > 0) parts += '<circle cx="60" cy="60" r="40" fill="none" stroke="' + p[1] + '" stroke-width="16" stroke-dasharray="' + len.toFixed(2) + ' ' + circ + '" stroke-dashoffset="' + (-off).toFixed(2) + '" transform="rotate(-90 60 60)"/>';
+    off += len;
+  });
+  if (!s.total) parts = '<circle cx="60" cy="60" r="40" fill="none" stroke="#e5e5e5" stroke-width="16"/>';
+  return '<svg viewBox="0 0 120 120" width="96" height="96">' + parts + '<text x="60" y="67" text-anchor="middle" font-size="24" font-weight="600" fill="#1b1b1b">' + s.total + '</text></svg>';
+}
+
+function blockerBars(s) {
+  var keys = Object.keys(s.blockers).sort(function (a, b) { return s.blockers[b] - s.blockers[a]; });
+  if (!keys.length) return '<div style="color:#888;font-size:11px">No blockers recorded</div>';
+  var max = s.blockers[keys[0]];
+  return '<div style="font-size:11px;font-weight:600;margin-bottom:4px">Why jobs were not completed</div>' +
+    keys.slice(0, 5).map(function (k) {
+      var n = s.blockers[k];
+      var col = k === 'Manpower' ? C_NOT : C_ONG;
+      return '<div style="display:grid;grid-template-columns:78px 1fr 16px;gap:6px;align-items:center;margin-bottom:4px;font-size:11px"><span style="color:#555">' + esc(k) + '</span><div style="background:#eee;height:10px;border-radius:3px"><div style="width:' + Math.round(n / max * 100) + '%;height:10px;background:' + col + ';border-radius:3px"></div></div><b>' + n + '</b></div>';
+    }).join('');
+}
+
+/* history: [{date, headcount}] other nights; current night added here */
+function trendSvg(history, curDate, curTotal) {
+  var pts = (history || []).filter(function (h) { return h.date !== curDate && h.date < curDate; });
+  pts = pts.concat([{ date: curDate, headcount: curTotal }]).sort(function (a, b) { return a.date < b.date ? -1 : 1; }).slice(-14);
+  if (pts.length < 2) return '<div style="font-size:10px;color:#999;text-align:right;padding-top:12px">Trend appears after the second saved night</div>';
+  var W = 250, H = 58, base = 46, bw = W / pts.length, max = Math.max.apply(null, pts.map(function (p) { return p.headcount; })) || 1;
+  var bars = pts.map(function (p, i) {
+    var h = Math.max(2, Math.round(p.headcount / max * 30)), cur = p.date === curDate, cx = (i * bw + bw / 2).toFixed(1);
+    return '<rect x="' + (i * bw + 2).toFixed(1) + '" y="' + (base - h) + '" width="' + (bw - 4).toFixed(1) + '" height="' + h + '" rx="2" fill="' + (cur ? '#1f3864' : '#b9c4d9') + '"/>' +
+      (cur || i === 0 ? '<text x="' + cx + '" y="' + (base - h - 3) + '" text-anchor="middle" font-size="9" fill="#333">' + p.headcount + '</text>' : '') +
+      (i === 0 || cur ? '<text x="' + (i === 0 ? 1 : W - 1) + '" y="56" text-anchor="' + (i === 0 ? 'start' : 'end') + '" font-size="8.5" fill="#777">' + shortDate(p.date) + '</text>' : '');
+  }).join('');
+  return '<svg viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H + '">' + bars + '</svg>';
+}
+
+function trendLabel(history, date) {
+  var n = Math.min(14, (history || []).filter(function (h) { return h.date < date; }).length + 1);
+  return n < 2 ? '' : 'Headcount, last ' + n + ' nights';
+}
+
+function headcountTable(rows) {
+  var total = sumCounts(rows);
+  if (!rows.length) return '<div style="color:#888">No headcount entered</div>';
+  return '<table class="t"><tr>' + rows.map(function (r) { return '<th>' + esc(r.name) + '</th>'; }).join('') + '<th class="tot">TOTAL</th></tr><tr>' +
+    rows.map(function (r) { return '<td>' + (parseInt(r.count, 10) || 0) + '</td>'; }).join('') + '<td class="tot">' + total + '</td></tr></table>';
+}
+
+function welderTable(w) {
+  w = w || {};
+  var cols = [['Welding support', w.ws], ['Welding spool', w.wsp], ['Fit-up support', w.fs], ['Fit-up spool', w.fsp], ['CH', w.ch]];
+  var tot = cols.reduce(function (s, c) { return s + (parseInt(c[1], 10) || 0); }, 0);
+  return '<table class="t"><tr>' + cols.map(function (c) { return '<th>' + c[0] + '</th>'; }).join('') + '<th class="tot">TOTAL</th></tr><tr>' +
+    cols.map(function (c) { return '<td>' + (parseInt(c[1], 10) || 0) + '</td>'; }).join('') + '<td class="tot">' + tot + '</td></tr></table>';
+}
+
+function activityBars(s) {
+  var names = ACT_ORDER.filter(function (n) { return s.acts[n]; });
+  if (!names.length) return '<div style="color:#888">No DABS loaded</div>';
+  var max = Math.max.apply(null, names.map(function (n) { var a = s.acts[n]; return a.done + a.ongoing + a.notdone; }));
+  var rows = names.map(function (n) {
+    var a = s.acts[n], t = a.done + a.ongoing + a.notdone, segs = '';
+    [['done', C_DONE], ['ongoing', C_ONG], ['notdone', C_NOT]].forEach(function (p) {
+      if (a[p[0]]) segs += '<div style="flex:' + a[p[0]] + ';background:' + p[1] + '">' + a[p[0]] + '</div>';
+    });
+    return '<div class="row"><span>' + n + '</span><div class="bar" style="width:' + Math.max(14, Math.round(t / max * 100)) + '%">' + segs + '</div><span style="color:#666">' + t + (t === 1 ? ' job' : ' jobs') + '</span></div>';
+  }).join('');
+  var legend = '<div class="leg"><span><i style="background:' + C_DONE + '"></i>Done</span><span><i style="background:' + C_ONG + '"></i>Ongoing</span><span><i style="background:' + C_NOT + '"></i>Not done</span></div>';
+  var night = s.night.total ? '<div style="color:#555;font-size:11px;margin-top:6px">Night added: ' + s.night.total + ' job' + (s.night.total === 1 ? '' : 's') + ' (' + [s.night.done ? s.night.done + ' done' : '', s.night.ongoing ? s.night.ongoing + ' ongoing' : '', s.night.notdone ? s.night.notdone + ' not done' : ''].filter(Boolean).join(', ') + ')</div>' : '';
+  return rows + legend + night;
+}
+
+function photoCell(p, h) {
+  var col = p.kind === 'blocker' ? '#d64545' : '#2e9e5b';
+  var lab = p.kind === 'blocker' ? 'Blocker' : 'Done';
+  return '<div><div class="ph" style="' + (h ? 'height:' + h + 'px;' : '') + 'border:2px solid ' + col + ';background-image:url(\'' + p.url + '\')"></div><div class="cap"><b style="color:' + col + '">' + lab + '</b>' + (p.caption ? ' · ' + esc(p.caption) : '') + '</div></div>';
+}
+
+function pageHeader(d, suffix) {
+  return '<div class="hd"><div><b>' + esc(d.title || 'Night shift report') + '</b> <span>· Night of ' + fmtNight(d.date) + (suffix || '') + '</span></div></div>';
+}
+
+/* Returns array of page HTML strings. Page footer numbers filled in here. */
+function buildReportPages(d, history) {
+  var s = calcSummary((d.dabs && d.dabs.jobs) || []);
+  var rows = d.headcount || [];
+  var total = sumCounts(rows);
+  var photos = d.photos || [];
+  var concerns = (d.concerns || []).filter(function (c) { return (c.text || '').trim(); });
+
+  var conHtml = concerns.length
+    ? '<div class="con"><b>Concerns</b><br>' + concerns.map(function (c) { return esc(c.trade) + ': ' + esc(c.text); }).join('<br>') + '</div>'
+    : '<div class="con" style="background:#f3f7f3;border-color:#cfe3d2"><b style="color:#2e7d4a">Concerns</b><br>None reported</div>';
+
+  var main = '<div class="rp">' + pageHeader(d) +
+    '<div class="sec kpi">' +
+      '<div class="tile" style="background:#f0f0f0"><i style="color:#555">Headcount</i><b>' + total + '</b></div>' +
+      '<div class="tile" style="background:#e3f4ea"><i style="color:#1d7a43">Done</i><b style="color:#1d7a43">' + s.done + '</b></div>' +
+      '<div class="tile" style="background:#fdf3d6"><i style="color:#8a5a00">Ongoing</i><b style="color:#8a5a00">' + s.ongoing + '</b></div>' +
+      '<div class="tile" style="background:#fbe4e4"><i style="color:#a32525">Not done</i><b style="color:#a32525">' + s.notdone + '</b></div>' +
+      '<div>' + donutSvg(s) + '</div>' +
+      '<div>' + blockerBars(s) + '</div>' +
+    '</div>' +
+    '<div class="sec" style="margin-top:16px"><div style="display:flex;justify-content:space-between;align-items:flex-end"><div class="h" style="margin:0">Headcount</div><div style="text-align:right"><div style="font-size:10px;color:#777;margin-bottom:1px">' + trendLabel(history, d.date) + '</div>' + trendSvg(history, d.date, total) + '</div></div>' + headcountTable(rows) + '</div>' +
+    '<div class="sec"><div class="h">Welder distribution</div>' + welderTable(d.welders) + '</div>' +
+    '<div class="sec two"><div><div class="h">Work status by activity</div>' + activityBars(s) + '</div>' + conHtml + '</div>' +
+    '<div class="sec"><div class="h">Photos</div>' + (photos.length ? '<div class="photos">' + photos.slice(0, 4).map(function (p) { return photoCell(p); }).join('') + '</div>' : '<div style="color:#888">No photos added</div>') + '</div>' +
+    '</div>';
+
+  var pages = [main];
+  for (var i = 4; i < photos.length; i += 8) {
+    pages.push('<div class="rp">' + pageHeader(d, ' · photos') + '<div class="photos" style="grid-template-columns:repeat(2,1fr);gap:14px">' +
+      photos.slice(i, i + 8).map(function (p) { return photoCell(p, 225); }).join('') + '</div></div>');
+  }
+  var n = pages.length;
+  return pages.map(function (p, idx) {
+    return p.replace(/<\/div>$/, '<div class="pf"><span>Generated by Night Report</span><span>' + (idx + 1) + ' / ' + n + '</span></div></div>');
+  });
+}
+
+/* ---------- Headcount picture reader (table grid + per-cell OCR) ---------- */
+function loadImg(src) {
+  return new Promise(function (res, rej) { var im = new Image(); im.onload = function () { res(im); }; im.onerror = function () { rej(new Error('Could not open image')); }; im.src = src; });
+}
+
+async function grayOf(src) {
+  var im = await loadImg(src);
+  var c = document.createElement('canvas');
+  c.width = im.naturalWidth; c.height = im.naturalHeight;
+  var x = c.getContext('2d');
+  x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
+  x.drawImage(im, 0, 0);
+  var d = x.getImageData(0, 0, c.width, c.height).data, g = new Uint8Array(c.width * c.height);
+  for (var i = 0; i < g.length; i++) g[i] = (d[4 * i] * 0.299 + d[4 * i + 1] * 0.587 + d[4 * i + 2] * 0.114) | 0;
+  return { w: c.width, h: c.height, g: g };
+}
+
+function runGroups(flags) {
+  var out = [], s = -1;
+  for (var i = 0; i <= flags.length; i++) {
+    if (i < flags.length && flags[i]) { if (s < 0) s = i; }
+    else if (s >= 0) { out.push({ s: s, e: i - 1 }); s = -1; }
+  }
+  return out;
+}
+
+function findGrid(img) {
+  var W = img.w, H = img.h, g = img.g, y, x;
+  var rowFlag = new Array(H);
+  for (y = 0; y < H; y++) { var n = 0; for (x = 0; x < W; x++) if (g[y * W + x] < 110) n++; rowFlag[y] = n > 0.6 * W; }
+  var hl = runGroups(rowFlag);
+  if (hl.length < 4) return null;
+  var y0 = hl[0].s, y1 = hl[hl.length - 1].e, colFlag = new Array(W);
+  for (x = 0; x < W; x++) { var m = 0; for (y = y0; y <= y1; y++) if (g[y * W + x] < 110) m++; colFlag[x] = m > 0.5 * (y1 - y0 + 1); }
+  var vl = runGroups(colFlag);
+  if (vl.length < 3) return null;
+  return { hl: hl, vl: vl };
+}
+
+/* Crop a region, trim to the ink, binarise, scale up and pad with white (what the OCR engine likes). */
+function cellCanvas(img, x0, y0, x1, y1, th, sc) {
+  var W = img.w, g = img.g, minX = 1e9, minY = 1e9, maxX = -1, maxY = -1, x, y;
+  for (y = y0; y <= y1; y++) for (x = x0; x <= x1; x++) if (g[y * W + x] < th) { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
+  if (maxX < 0) return null;
+  minX = Math.max(x0, minX - 6); minY = Math.max(y0, minY - 6); maxX = Math.min(x1, maxX + 6); maxY = Math.min(y1, maxY + 6);
+  var w = maxX - minX + 1, h = maxY - minY + 1;
+  var t = document.createElement('canvas'); t.width = w; t.height = h;
+  var tc = t.getContext('2d'), id = tc.createImageData(w, h);
+  for (y = 0; y < h; y++) for (x = 0; x < w; x++) { var v = g[(minY + y) * W + minX + x] > th ? 255 : 0, k = 4 * (y * w + x); id.data[k] = id.data[k + 1] = id.data[k + 2] = v; id.data[k + 3] = 255; }
+  tc.putImageData(id, 0, 0);
+  var o = document.createElement('canvas'); o.width = (w + 60) * sc; o.height = (h + 60) * sc;
+  var oc = o.getContext('2d'); oc.fillStyle = '#fff'; oc.fillRect(0, 0, o.width, o.height);
+  oc.imageSmoothingEnabled = true; oc.drawImage(t, 30 * sc, 30 * sc, w * sc, h * sc);
+  return o;
+}
+
+async function voteDigits(img, x0, y0, x1, y1, rec) {
+  var isNum = function (s) { return /^\d{1,3}$/.test(s); };
+  var first = [];
+  var combos1 = [[140, 3, 7], [170, 3, 7]];
+  for (var i = 0; i < combos1.length; i++) {
+    var c = cellCanvas(img, x0, y0, x1, y1, combos1[i][0], combos1[i][1]);
+    if (!c) return null;
+    var r = (await rec(c, { digits: true, psm: combos1[i][2] })).replace(/\s+/g, '');
+    first.push(r);
+  }
+  if (isNum(first[0]) && first[0] === first[1]) return { value: parseInt(first[0], 10), sure: true };
+  var votes = {};
+  first.forEach(function (r) { if (isNum(r)) votes[r] = (votes[r] || 0) + 1; });
+  var ths = [110, 140, 170, 200], scs = [2, 3, 4], psms = [7, 10];
+  for (var a = 0; a < ths.length; a++) for (var b = 0; b < scs.length; b++) for (var d = 0; d < psms.length; d++) {
+    var cv = cellCanvas(img, x0, y0, x1, y1, ths[a], scs[b]);
+    if (!cv) continue;
+    var t = (await rec(cv, { digits: true, psm: psms[d] })).replace(/\s+/g, '');
+    if (isNum(t)) votes[t] = (votes[t] || 0) + 1;
+  }
+  var keys = Object.keys(votes).sort(function (p, q) { return votes[q] - votes[p]; });
+  if (!keys.length) return { value: null, sure: false };
+  var top = votes[keys[0]], second = keys.length > 1 ? votes[keys[1]] : 0;
+  return { value: parseInt(keys[0], 10), sure: top >= 6 && top >= 2 * second };
+}
+
+/* rec(canvas, {digits, psm}) -> text. Returns {rows:[{name,count,unsure}], total, sum, ok, note} */
+async function readHeadcountImage(src, rec, progress) {
+  var img = await grayOf(src), grid = findGrid(img);
+  if (!grid) return { rows: [], total: null, sum: 0, ok: false, note: 'Could not find the table grid in the picture.' };
+  var hl = grid.hl, vl = grid.vl, rows = [], total = null;
+  var lx0 = vl[0].e + 4, lx1 = vl[1].s - 4, cx0 = vl[1].e + 4, cx1 = vl[2].s - 4;
+  for (var i = 0; i < hl.length - 1; i++) {
+    var y0 = hl[i].e + 3, y1 = hl[i + 1].s - 2;
+    if (y1 - y0 < 10) continue;
+    if (progress) progress(i + 1, hl.length - 1);
+    var lc = cellCanvas(img, lx0, y0, lx1, y1, 140, 3);
+    if (!lc) continue;
+    var label = (await rec(lc, { digits: false, psm: 7 })).replace(/^[^A-Za-z]+/, '').replace(/[^A-Za-z0-9)./]+$/, '').replace(/\s+/g, ' ').trim();
+    if (!label) continue;
+    var v = await voteDigits(img, cx0, y0, cx1, y1, rec);
+    if (/^total/i.test(label)) { total = v && v.value != null ? v.value : null; continue; }
+    rows.push({ name: abbrevTrade(label), count: v && v.value != null ? v.value : 0, unsure: !v || !v.sure });
+  }
+  var missing = rows.filter(function (r) { return r.unsure; });
+  var sum = sumCounts(rows);
+  var note = '';
+  if (total != null && sum !== total) {
+    if (missing.length === 1) { missing[0].count = Math.max(0, missing[0].count + (total - sum)); sum = sumCounts(rows); note = 'One number was unclear; it was worked out from the TOTAL row.'; }
+  }
+  return { rows: rows, total: total, sum: sum, ok: total != null && sum === total, note: note };
+}
+
+/* tesseract.js recognizer (loaded from the CDN script in the page) */
+var _tw = {};
+async function tessRec(canvas, opt) {
+  var key = opt.digits ? 'digits' : 'text';
+  if (!_tw[key]) {
+    _tw[key] = await Tesseract.createWorker('eng');
+    if (opt.digits) await _tw[key].setParameters({ tessedit_char_whitelist: '0123456789' });
+  }
+  await _tw[key].setParameters({ tessedit_pageseg_mode: String(opt.psm || 7) });
+  var r = await _tw[key].recognize(canvas);
+  return (r.data.text || '').trim();
+}
+
+/* ---------- App: state, Google Drive, screens ---------- */
+var SCOPE = 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/drive.file';
+var ROOT_NAME = 'Night Report';
+var XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+var GSHEET_MIME = 'application/vnd.google-apps.spreadsheet';
+var FOLDER_MIME = 'application/vnd.google-apps.folder';
+var DEFAULT_TRADES = ['Staff', 'Rigger CH', 'Rigger', 'Plater CH', 'Plater', 'Scaffolder', 'Pipe Welder CH', 'Pipe Welder', 'Pipe Fitter', 'PWHT', 'FW / Gen Op', 'Mat. Controller'];
+var CONCERN_TRADES = ['Plating', 'Piping', 'Lifting', 'Scaffolding', 'QC', 'All'];
+var MAX_PHOTOS = 20;
+
+function freshState() {
+  return {
+    date: '',
+    dabs: { file: '', jobs: [], warnings: [] },
+    headcount: DEFAULT_TRADES.map(function (n) { return { name: n, count: 0 }; }),
+    welders: { ws: 0, wsp: 0, fs: 0, fsp: 0, ch: 0 },
+    concerns: [],
+    photos: [],
+    removedPhotoIds: [],
+    src: { warnings: [] }
+  };
+}
+
+var S = freshState();
+var UI = { view: 'home', signed: false, busy: '', index: [], error: '', loadingIndex: false, nights: [], curNight: null, lastView: '' };
+
+function setting(k, d) { var v = localStorage.getItem('nr_' + k); return v == null ? d : v; }
+
+/* ---------- Auth ---------- */
+var tokenClient = null, accessToken = '', tokenExp = 0;
+
+function ensureTokenClient() {
+  if (tokenClient) return true;
+  var cid = setting('client_id', '');
+  if (!cid || !window.google || !google.accounts || !google.accounts.oauth2) return false;
+  tokenClient = google.accounts.oauth2.initTokenClient({ client_id: cid, scope: SCOPE, callback: function () {} });
+  return true;
+}
+
+function getToken(interactive) {
+  return new Promise(function (res, rej) {
+    if (accessToken && Date.now() < tokenExp - 60000) return res(accessToken);
+    if (!ensureTokenClient()) return rej(new Error('Google sign-in is not ready. Check the Client ID in Settings and reload.'));
+    tokenClient.callback = function (r) {
+      if (r.error) return rej(new Error(r.error_description || r.error));
+      accessToken = r.access_token;
+      tokenExp = Date.now() + (r.expires_in || 3600) * 1000;
+      localStorage.setItem('nr_signed', '1');
+      res(accessToken);
+    };
+    tokenClient.error_callback = function (e) { rej(new Error((e && e.type) || 'sign_in_cancelled')); };
+    tokenClient.requestAccessToken({ prompt: interactive ? '' : 'none' });
+  });
+}
+
+async function authHeader() {
+  var t;
+  try { t = await getToken(false); } catch (e) { t = await getToken(true); }
+  return { Authorization: 'Bearer ' + t };
+}
+
+/* ---------- Drive helpers ---------- */
+async function drive(path, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign(await authHeader(), opts.headers || {});
+  var r = await fetch('https://www.googleapis.com/drive/v3/' + path, opts);
+  if (!r.ok) {
+    var msg = '';
+    try { msg = (await r.json()).error.message; } catch (e) { msg = r.statusText; }
+    var err = new Error('Drive: ' + msg); err.status = r.status; throw err;
+  }
+  return r;
+}
+
+function qname(n) { return String(n).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
+
+async function listFiles(q) {
+  var r = await drive('files?q=' + encodeURIComponent(q) + '&fields=files(id,name,mimeType)&pageSize=200');
+  return (await r.json()).files || [];
+}
+async function listChildren(folderId) { return listFiles("trashed=false and '" + folderId + "' in parents"); }
+
+async function createFolder(name, parent) {
+  var r = await drive('files?fields=id', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name, mimeType: FOLDER_MIME, parents: [parent || 'root'] }) });
+  return (await r.json()).id;
+}
+
+async function findOrCreateFolder(name, parent) {
+  var f = await listFiles("name='" + qname(name) + "' and mimeType='" + FOLDER_MIME + "' and trashed=false and '" + (parent || 'root') + "' in parents");
+  return f.length ? f[0].id : createFolder(name, parent);
+}
+
+async function uploadFile(name, blob, mime, parent, existingId) {
+  var boundary = 'nrb' + Math.random().toString(36).slice(2);
+  var meta = existingId ? { name: name } : { name: name, parents: [parent] };
+  var body = new Blob(['--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify(meta) + '\r\n--' + boundary + '\r\nContent-Type: ' + mime + '\r\n\r\n', blob, '\r\n--' + boundary + '--']);
+  var url = 'https://www.googleapis.com/upload/drive/v3/files' + (existingId ? '/' + existingId : '') + '?uploadType=multipart&fields=id';
+  var h = await authHeader();
+  h['Content-Type'] = 'multipart/related; boundary=' + boundary;
+  var r = await fetch(url, { method: existingId ? 'PATCH' : 'POST', headers: h, body: body });
+  if (!r.ok) { var m = ''; try { m = (await r.json()).error.message; } catch (e) { m = r.statusText; } throw new Error('Upload failed: ' + m); }
+  return (await r.json()).id;
+}
+
+async function downloadBlob(f) {
+  if (f.mimeType === GSHEET_MIME) return (await drive('files/' + f.id + '/export?mimeType=' + encodeURIComponent(XLSX_MIME))).blob();
+  return (await drive('files/' + f.id + '?alt=media')).blob();
+}
+async function downloadJson(id) { return (await drive('files/' + id + '?alt=media')).json(); }
+
+function blobToDataUrl(b) {
+  return new Promise(function (res, rej) { var fr = new FileReader(); fr.onload = function () { res(fr.result); }; fr.onerror = rej; fr.readAsDataURL(b); });
+}
+
+async function ensureRoot() {
+  var id = localStorage.getItem('nr_root');
+  if (id) {
+    try { var j = await (await drive('files/' + id + '?fields=id,trashed')).json(); if (j.trashed) id = null; } catch (e) { id = null; }
+  }
+  if (!id) { id = await findOrCreateFolder(ROOT_NAME, null); localStorage.setItem('nr_root', id); }
+  return id;
+}
+
+async function readIndex() {
+  var root = await ensureRoot();
+  var f = await listFiles("name='index.json' and trashed=false and '" + root + "' in parents");
+  if (!f.length) return { id: null, list: [], root: root };
+  var list = await downloadJson(f[0].id);
+  return { id: f[0].id, list: Array.isArray(list) ? list : [], root: root };
+}
+
+async function refreshIndex() {
+  UI.loadingIndex = true;
+  try { UI.index = (await readIndex()).list; UI.error = ''; } catch (e) { UI.error = e.message; }
+  UI.loadingIndex = false;
+}
+
+/* ---------- The input folder ---------- */
+async function resolveInputRoot() {
+  var v = (setting('input', '') || '').trim();
+  if (!v) throw new Error('Set the Drive input folder in Settings first.');
+  var m = /folders\/([-\w]{20,})/.exec(v) || /[?&]id=([-\w]{20,})/.exec(v) || /^([-\w]{25,})$/.exec(v);
+  if (m) return m[1];
+  var f = await listFiles("name='" + qname(v) + "' and mimeType='" + FOLDER_MIME + "' and trashed=false");
+  if (!f.length) throw new Error('Folder "' + v + '" not found in your Drive.');
+  return f[0].id;
+}
+
+/* Nights = sub-folders named with a date, plus loose files named with a date */
+async function listNights() {
+  var root = await resolveInputRoot();
+  var kids = await listChildren(root), map = {};
+  var yr = new Date().getFullYear();
+  kids.forEach(function (k) {
+    var iso = parseDateName(k.name, yr);
+    if (!iso) return;
+    var n = map[iso] || (map[iso] = { iso: iso, folderId: null, name: '', files: [] });
+    if (k.mimeType === FOLDER_MIME) { n.folderId = k.id; n.name = k.name; }
+    else { n.files.push(k); if (!n.name) n.name = '(files in the main folder)'; }
+  });
+  return Object.keys(map).sort().reverse().map(function (k) { return map[k]; });
+}
+
+/* ---------- Reading one night from Drive ---------- */
+function compressImage(file) {
+  return (async function () {
+    var bmp;
+    try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch (e) { bmp = await createImageBitmap(file); }
+    var max = 1280, sc = Math.min(1, max / Math.max(bmp.width, bmp.height));
+    var cv = document.createElement('canvas');
+    cv.width = Math.round(bmp.width * sc); cv.height = Math.round(bmp.height * sc);
+    cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
+    return cv.toDataURL('image/jpeg', 0.8);
+  })();
+}
+
+async function readDabsBlob(blob) {
+  var wb = XLSX.read(await blob.arrayBuffer(), { type: 'array' });
+  var best = null;
+  wb.SheetNames.forEach(function (n) {
+    var rows = XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, defval: '', raw: false });
+    var r = parseDabs(rows, new Date().getFullYear());
+    if (!best || r.jobs.length > best.jobs.length) best = r;
+  });
+  return best;
+}
+
+async function sheetBlobToText(blob) {
+  var wb = XLSX.read(await blob.arrayBuffer(), { type: 'array' });
+  var rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '', raw: false });
+  return rows.map(function (r) { return r.filter(function (c) { return String(c).trim() !== ''; }).join(' '); }).join('\n');
+}
+
+async function pullNight(night, say) {
+  var st = freshState();
+  st.date = night.iso;
+  st.src = { nightIso: night.iso, folderName: night.name, dabsFile: '', hcSource: '', hcCheck: null, hcImg: '', welderImg: '', warnings: [] };
+  var warn = function (m) { st.src.warnings.push(m); };
+
+  say('Looking in the Drive folder…');
+  var files = night.folderId ? await listChildren(night.folderId) : night.files.slice();
+  var items = [];
+  for (var i = 0; i < files.length; i++) {
+    var f = files[i];
+    if (f.mimeType === FOLDER_MIME) {
+      if (/block|work|photo|picture|resim|foto|image/i.test(f.name)) {
+        var kind = /block/i.test(f.name) ? 'blocker' : 'work';
+        (await listChildren(f.id)).forEach(function (k) { items.push({ id: k.id, name: k.name, mimeType: k.mimeType, parentKind: kind }); });
+      }
+    } else items.push({ id: f.id, name: f.name, mimeType: f.mimeType, parentKind: '' });
+  }
+  items.forEach(function (it) { it.role = classifyFile(it.name, it.mimeType, it.parentKind); });
+  var by = function (role) { return items.filter(function (it) { return it.role === role; }).sort(function (a, b) { return a.name < b.name ? -1 : 1; }); };
+
+  /* DABS */
+  var dabsFiles = by('dabs').sort(function (a, b) { return (/dabs/i.test(b.name) ? 1 : 0) - (/dabs/i.test(a.name) ? 1 : 0); }).slice(0, 3);
+  var dabs = null;
+  if (!window.XLSX) warn('The Excel reader did not load. Check your internet connection and reload.');
+  else if (!dabsFiles.length) warn('No DABS Excel file found in the folder.');
+  else {
+    for (var d = 0; d < dabsFiles.length; d++) {
+      say('Reading DABS ' + dabsFiles[d].name + '…');
+      try {
+        var r = await readDabsBlob(await downloadBlob(dabsFiles[d]));
+        if (r && (!dabs || r.jobs.length > dabs.res.jobs.length)) dabs = { res: r, name: dabsFiles[d].name };
+      } catch (e) { warn('Could not read ' + dabsFiles[d].name + ': ' + e.message); }
+    }
+    if (dabs && dabs.res.jobs.length) {
+      st.dabs = { file: dabs.name, jobs: dabs.res.jobs, warnings: dabs.res.warnings };
+      st.src.dabsFile = dabs.name;
+      st.concerns = dabs.res.concerns || [];
+      if (dabs.res.night && dabs.res.night !== night.iso) warn('The DABS title says ' + fmtNight(dabs.res.night) + ' but the folder is ' + fmtNight(night.iso) + '. The folder date is used.');
+    } else if (dabsFiles.length) warn('No jobs with a DONE / ONGOING / NOT DONE status were found in the DABS file.');
+  }
+
+  /* Headcount */
+  var hcText = by('headcount-text')[0], hcImg = by('headcount-img')[0], hcRes = null;
+  if (hcText) {
+    say('Reading headcount ' + hcText.name + '…');
+    try {
+      var hb = await downloadBlob(hcText);
+      var txt = /\.(xlsx|xlsm|xls)$/i.test(hcText.name) || /spreadsheet|ms-excel/.test(hcText.mimeType) ? await sheetBlobToText(hb) : await hb.text();
+      var pr = parseHeadcount(txt);
+      if (pr.rows.length) {
+        st.headcount = pr.rows; st.src.hcSource = hcText.name;
+        st.src.hcCheck = { total: pr.total, sum: sumCounts(pr.rows), ok: pr.total == null || pr.total === sumCounts(pr.rows), note: '' };
+      } else warn('No "trade number" lines found in ' + hcText.name + '.');
+    } catch (e) { warn('Could not read ' + hcText.name + ': ' + e.message); }
+  }
+  if (!st.src.hcSource && hcImg) {
+    try {
+      var ib = await downloadBlob(hcImg);
+      var url = await blobToDataUrl(ib);
+      st.src.hcImg = url;
+      if (!window.Tesseract) warn('The picture reader did not load. Enter the headcount below, or upload headcount as a .txt or Excel file.');
+      else {
+        say('Reading headcount picture… (the first time can take a minute)');
+        hcRes = await readHeadcountImage(url, tessRec, function (a, n) { say('Reading headcount picture, row ' + a + ' of ' + n + '…'); });
+        if (hcRes.rows.length >= 3) {
+          st.headcount = hcRes.rows.map(function (r) { return { name: r.name, count: r.count, unsure: r.unsure && !hcRes.ok }; });
+          st.src.hcSource = hcImg.name;
+          st.src.hcCheck = { total: hcRes.total, sum: hcRes.sum, ok: hcRes.ok, note: hcRes.note };
+        } else warn('Could not read the headcount picture. ' + (hcRes.note || '') + ' Enter the numbers below.');
+      }
+    } catch (e) { warn('Could not read the headcount picture: ' + e.message); }
+  }
+  if (!st.src.hcSource && dabs && dabs.res.headcount) {
+    st.headcount = dabs.res.headcount.rows;
+    st.src.hcSource = dabs.name + ' (table under the report)';
+    st.src.hcCheck = { total: dabs.res.headcount.total, sum: sumCounts(st.headcount), ok: dabs.res.headcount.total == null || dabs.res.headcount.total === sumCounts(st.headcount), note: '' };
+  }
+  if (!st.src.hcSource && !hcText && !hcImg) warn('No headcount file found (name it "headcount…").');
+
+  /* Welding sheet picture (for reference while entering counts) */
+  var wl = by('welder-img')[0];
+  if (wl) { try { st.src.welderImg = await compressImage(await downloadBlob(wl)); } catch (e) { warn('Could not open the welding sheet picture.'); } }
+
+  /* Photos */
+  var ph = by('photo-work').concat(by('photo-blocker')).sort(function (a, b) { return a.name < b.name ? -1 : 1; });
+  if (ph.length > MAX_PHOTOS) { warn(ph.length + ' photos found; the first ' + MAX_PHOTOS + ' are used.'); ph = ph.slice(0, MAX_PHOTOS); }
+  for (var p = 0; p < ph.length; p++) {
+    say('Loading photo ' + (p + 1) + ' of ' + ph.length + '…');
+    try {
+      st.photos.push({ id: null, kind: ph[p].role === 'photo-blocker' ? 'blocker' : 'work', caption: photoCaption(ph[p].name), url: await compressImage(await downloadBlob(ph[p])) });
+    } catch (e) { warn('Could not open photo ' + ph[p].name); }
+  }
+  var heic = by('heic').length;
+  if (heic) warn(heic + ' iPhone (HEIC) photo(s) skipped. Share them as JPEG or set the camera to "Most compatible".');
+  return st;
+}
+
+/* ---------- Report data / PDF ---------- */
+function reportData() {
+  return { date: S.date, title: setting('title', 'W12 night shift report'), dabs: S.dabs, headcount: S.headcount, welders: S.welders, concerns: S.concerns, photos: S.photos };
+}
+
+async function makePdf() {
+  var pages = buildReportPages(reportData(), UI.index);
+  var host = document.createElement('div');
+  host.style.cssText = 'position:fixed;left:-10000px;top:0;width:794px';
+  host.innerHTML = pages.join('');
+  document.body.appendChild(host);
+  try {
+    var els = host.querySelectorAll('.rp');
+    var pdf = new window.jspdf.jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
+    for (var i = 0; i < els.length; i++) {
+      var canvas = await window.html2canvas(els[i], { scale: 2, backgroundColor: '#ffffff', useCORS: true });
+      if (i) pdf.addPage();
+      pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, 210, 297);
+    }
+    return pdf.output('blob');
+  } finally { host.remove(); }
+}
+
+/* ---------- Save / open a finished report ---------- */
+async function saveNight(blobPdf) {
+  var ix = await readIndex();
+  var folder = await findOrCreateFolder(S.date, ix.root);
+  var existing = {};
+  (await listChildren(folder)).forEach(function (f) { existing[f.name] = f.id; });
+
+  for (var i = 0; i < S.removedPhotoIds.length; i++) { try { await drive('files/' + S.removedPhotoIds[i], { method: 'DELETE' }); } catch (e) { /* already gone */ } }
+  S.removedPhotoIds = [];
+
+  for (var p = 0; p < S.photos.length; p++) {
+    var ph = S.photos[p];
+    if (!ph.id) {
+      var blob = await (await fetch(ph.url)).blob();
+      ph.id = await uploadFile('photo_' + Date.now() + '_' + p + '.jpg', blob, 'image/jpeg', folder);
+    }
+  }
+  var data = { version: 2, date: S.date, title: setting('title', 'W12 night shift report'), dabs: S.dabs, headcount: S.headcount.map(function (r) { return { name: r.name, count: r.count }; }), welders: S.welders, concerns: S.concerns, photos: S.photos.map(function (x) { return { id: x.id, kind: x.kind, caption: x.caption }; }) };
+  await uploadFile('data.json', new Blob([JSON.stringify(data)], { type: 'application/json' }), 'application/json', folder, existing['data.json']);
+  var pdfName = 'Night report ' + S.date + '.pdf';
+  var pdfId = await uploadFile(pdfName, blobPdf, 'application/pdf', folder, existing[pdfName]);
+
+  var sum = calcSummary(S.dabs.jobs);
+  var entry = { date: S.date, headcount: sumCounts(S.headcount), done: sum.done, ongoing: sum.ongoing, notdone: sum.notdone, folderId: folder, pdfId: pdfId };
+  var list = ix.list.filter(function (e) { return e.date !== S.date; });
+  list.push(entry);
+  list.sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+  await uploadFile('index.json', new Blob([JSON.stringify(list)], { type: 'application/json' }), 'application/json', ix.root, ix.id);
+  UI.index = list;
+  return entry;
+}
+
+async function loadNight(entry) {
+  var kids = await listChildren(entry.folderId);
+  var df = kids.filter(function (f) { return f.name === 'data.json'; })[0];
+  if (!df) throw new Error('data.json not found for ' + entry.date);
+  var d = await downloadJson(df.id);
+  var photos = await Promise.all((d.photos || []).map(async function (p) {
+    var b = await (await drive('files/' + p.id + '?alt=media')).blob();
+    return { id: p.id, kind: p.kind, caption: p.caption || '', url: await blobToDataUrl(b) };
+  }));
+  S = freshState();
+  S.date = d.date;
+  S.dabs = d.dabs || S.dabs;
+  S.headcount = d.headcount || S.headcount;
+  S.welders = d.welders || S.welders;
+  S.concerns = d.concerns || [];
+  S.photos = photos;
+}
+
+/* ---------- Screens ---------- */
+function chip(n, cls, label) { return '<span class="chip ' + cls + '">' + n + ' ' + label + '</span>'; }
+
+function histChart(list) {
+  var pts = (list || []).slice(-30);
+  if (pts.length < 2) return '<p class="muted">Headcount history appears after you save two nights.</p>';
+  var W = 640, H = 120, base = 98, bw = Math.min(44, W / pts.length), max = Math.max.apply(null, pts.map(function (p) { return p.headcount; })) || 1;
+  var bars = pts.map(function (p, i) {
+    var h = Math.max(2, Math.round(p.headcount / max * 70));
+    var x = i * bw;
+    return '<rect x="' + (x + 2).toFixed(1) + '" y="' + (base - h) + '" width="' + (bw - 4).toFixed(1) + '" height="' + h + '" rx="3" fill="#1f3864"/>' +
+      '<text x="' + (x + bw / 2).toFixed(1) + '" y="' + (base - h - 4) + '" text-anchor="middle" font-size="10" fill="#333">' + p.headcount + '</text>' +
+      (pts.length <= 15 || i % 2 === 0 ? '<text x="' + (x + bw / 2).toFixed(1) + '" y="112" text-anchor="middle" font-size="9" fill="#777">' + shortDate(p.date) + '</text>' : '');
+  }).join('');
+  return '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" style="max-height:150px" role="img" aria-label="Headcount per night">' + bars + '</svg>';
+}
+
+function viewHome() {
+  var needsSetup = !setting('client_id', '') || !setting('input', '');
+  var h = '';
+  if (needsSetup) {
+    h += '<div class="card warn"><b>First-time setup</b><p>Open Settings (gear icon, top right) and enter your Google Client ID and the name of your Drive input folder. The setup guide explains both.</p></div>';
+  } else if (!UI.signed) {
+    h += '<div class="card"><b>Sign in</b><p class="muted">The app reads your night folders in Drive and saves finished reports to a folder called "Night Report".</p><button class="pri" onclick="A.signIn()">Sign in with Google</button></div>';
+  }
+  if (UI.error) h += '<div class="card err">' + esc(UI.error) + '</div>';
+  h += '<div class="bar"><button class="pri" onclick="A.openNights()">New report</button></div>';
+  if (UI.signed) {
+    h += '<div class="card"><b>Headcount, last nights</b>' + histChart(UI.index) + '</div>';
+    h += '<div class="card"><b>Saved reports</b>';
+    if (UI.loadingIndex) h += '<p class="muted">Loading…</p>';
+    else if (!UI.index.length) h += '<p class="muted">No saved reports yet.</p>';
+    else h += UI.index.slice().reverse().map(function (e) {
+      return '<div class="item"><div><b>' + fmtNight(e.date) + '</b><div class="muted">Headcount ' + e.headcount + '</div><div>' + chip(e.done, 'd', 'done') + chip(e.ongoing, 'o', 'ongoing') + chip(e.notdone, 'n', 'not done') + '</div></div>' +
+        '<div class="btns"><button onclick="A.openNight(\'' + e.date + '\')">Open</button><a class="btn" target="_blank" rel="noopener" href="https://drive.google.com/file/d/' + e.pdfId + '/view">PDF</a></div></div>';
+    }).join('');
+    h += '</div>';
+  }
+  return h;
+}
+
+function viewNights() {
+  var saved = {};
+  UI.index.forEach(function (e) { saved[e.date] = true; });
+  var h = '<div class="card"><b>Choose the night</b><p class="muted">Nights found in your Drive folder "' + esc(setting('input', '')) + '". Pick one and the report is built from the files in it.</p>';
+  if (!UI.nights.length) h += '<p class="muted">No folders or files named with a date were found. Name the night folder like 2026-11-12 or 12.11.2026.</p>';
+  h += UI.nights.map(function (n) {
+    return '<div class="item"><div><b>' + fmtNight(n.iso) + '</b><div class="muted">' + esc(n.name) + (saved[n.iso] ? ' · report saved' : '') + '</div></div><div class="btns"><button class="pri" onclick="A.pick(\'' + n.iso + '\')">Make report</button></div></div>';
+  }).join('');
+  h += '</div>';
+  return h;
+}
+
+function viewSettings() {
+  return '<div class="card"><b>Settings</b>' +
+    '<label>Google Client ID<input id="s_cid" value="' + esc(setting('client_id', '')) + '" placeholder="123456-abc.apps.googleusercontent.com"></label>' +
+    '<label>Drive input folder (name or link)<input id="s_input" value="' + esc(setting('input', '')) + '" placeholder="Night Inputs"></label>' +
+    '<label>Report title<input id="s_title" value="' + esc(setting('title', 'W12 night shift report')) + '"></label>' +
+    '<div class="btns"><button class="pri" onclick="A.saveSettings()">Save</button><button onclick="A.go(\'home\')">Cancel</button></div></div>';
+}
+
+function fromDriveCard() {
+  var s = S.src || { warnings: [] };
+  if (!s.nightIso) return '';
+  var h = '<div class="card"><b>Found in Drive</b><p class="muted">Folder: ' + esc(s.folderName) + '</p>';
+  if (S.dabs.jobs.length) {
+    var sm = calcSummary(S.dabs.jobs);
+    h += '<p><b>DABS</b> · ' + esc(S.dabs.file) + '<br>' + sm.total + ' jobs ' + chip(sm.done, 'd', 'done') + chip(sm.ongoing, 'o', 'ongoing') + chip(sm.notdone, 'n', 'not done') + '</p>';
+  } else h += '<p><b>DABS</b> · not found</p>';
+  if (s.hcSource) {
+    var c = s.hcCheck;
+    h += '<p><b>Headcount</b> · ' + esc(s.hcSource) + '<br>' + (c ? (c.ok ? '<span class="okmsg">Rows add up to the TOTAL (' + c.sum + ').</span>' : '<span class="badmsg">Rows add up to ' + c.sum + ' but the TOTAL says ' + c.total + '. Check the highlighted rows below.</span>') : '') + (c && c.note ? '<br><span class="muted">' + esc(c.note) + '</span>' : '') + '</p>';
+    if (s.hcImg) h += '<img class="refimg" src="' + s.hcImg + '" alt="Headcount picture">';
+  } else h += '<p><b>Headcount</b> · not found, enter the numbers below</p>';
+  if (s.welderImg) h += '<p><b>Welding sheet</b><br><span class="muted">Count the welders in each group and enter them in step 2.</span></p><img class="refimg" src="' + s.welderImg + '" alt="Welding sheet">';
+  else h += '<p><b>Welding sheet</b> · not found (name the picture "welder…")</p>';
+  var bl = S.photos.filter(function (p) { return p.kind === 'blocker'; }).length;
+  h += '<p><b>Photos</b> · ' + S.photos.length + ' (' + bl + ' blocker)</p>';
+  if (s.warnings.length) h += '<ul class="warnlist">' + s.warnings.map(function (w) { return '<li>' + esc(w) + '</li>'; }).join('') + '</ul>';
+  h += '<button onclick="A.reload()">Reload from Drive</button></div>';
+  return h;
+}
+
+function viewEdit() {
+  var h = fromDriveCard();
+  h += '<div class="card"><b>1. Headcount</b><div id="hcRows">' + hcRowsHtml() + '</div><div class="btns"><button onclick="A.hcAdd()">Add row</button></div></div>';
+
+  var w = S.welders;
+  h += '<div class="card"><b>2. Welder distribution</b><div class="grid5">' +
+    [['ws', 'Welding support'], ['wsp', 'Welding spool'], ['fs', 'Fit-up support'], ['fsp', 'Fit-up spool'], ['ch', 'CH']].map(function (f) {
+      return '<label>' + f[1] + '<input type="number" min="0" inputmode="numeric" value="' + (w[f[0]] || 0) + '" oninput="A.setWelder(\'' + f[0] + '\',this.value)"></label>';
+    }).join('') + '</div></div>';
+
+  h += '<div class="card"><b>3. Concerns</b><p class="muted">Taken from the DABS file when it has a concern list. Edit or add as needed.</p><div id="conRows">' + concernRowsHtml() + '</div><button onclick="A.conAdd()">Add concern</button></div>';
+
+  h += '<div class="card"><b>4. Photos</b>' + (S.photos.length ? '' : '<p class="muted">No photos found in the folder.</p>') + '<div id="phRows">' + photoRowsHtml() + '</div></div>';
+
+  h += '<div class="bar"><button class="pri" onclick="A.preview()">Preview report</button></div>';
+  return h;
+}
+
+function hcRowsHtml() {
+  return S.headcount.map(function (r, i) {
+    return '<div class="hcrow' + (r.unsure ? ' unsure' : '') + '"><input value="' + esc(r.name) + '" oninput="A.hcName(' + i + ',this.value)"><input type="number" min="0" inputmode="numeric" value="' + (parseInt(r.count, 10) || 0) + '" oninput="A.hcCount(' + i + ',this.value)"><button aria-label="Remove row" onclick="A.hcDel(' + i + ')">×</button></div>';
+  }).join('') + '<div class="muted" style="margin-top:6px">Total: <b id="hcTotal">' + sumCounts(S.headcount) + '</b></div>';
+}
+
+function concernRowsHtml() {
+  return S.concerns.map(function (c, i) {
+    return '<div class="conrow"><select onchange="A.conTrade(' + i + ',this.value)">' + CONCERN_TRADES.map(function (t) { return '<option' + (t === c.trade ? ' selected' : '') + '>' + t + '</option>'; }).join('') + '</select>' +
+      '<input value="' + esc(c.text) + '" placeholder="Concern" oninput="A.conText(' + i + ',this.value)"><button aria-label="Remove concern" onclick="A.conDel(' + i + ')">×</button></div>';
+  }).join('');
+}
+
+function photoRowsHtml() {
+  return S.photos.map(function (p, i) {
+    return '<div class="phrow"><img src="' + p.url + '" alt=""><div><select onchange="A.phKind(' + i + ',this.value)"><option value="work"' + (p.kind === 'work' ? ' selected' : '') + '>Work done</option><option value="blocker"' + (p.kind === 'blocker' ? ' selected' : '') + '>Blocker</option></select>' +
+      '<input value="' + esc(p.caption) + '" placeholder="Caption (tag or short note)" oninput="A.phCap(' + i + ',this.value)"></div><button aria-label="Remove photo" onclick="A.phDel(' + i + ')">×</button></div>';
+  }).join('');
+}
+
+function viewPreview() {
+  var pages = buildReportPages(reportData(), UI.index);
+  var h = '<div class="bar"><button onclick="A.go(\'edit\')">Back</button><button class="pri" onclick="A.save()">Save to Drive</button><button onclick="A.downloadPdf()">Download PDF</button></div>';
+  h += '<div id="pv">' + pages.map(function (p) { return '<div class="pvwrap"><div class="pvin">' + p + '</div></div>'; }).join('') + '</div>';
+  return h;
+}
+
+function fitPreview() {
+  var pv = document.getElementById('pv');
+  if (!pv) return;
+  var sc = Math.min(1, (pv.clientWidth || 794) / 794);
+  pv.querySelectorAll('.pvwrap').forEach(function (w) {
+    w.style.height = Math.round(1123 * sc) + 'px';
+    var inner = w.firstChild;
+    inner.style.transform = 'scale(' + sc + ')';
+    inner.style.transformOrigin = 'top left';
+  });
+}
+
+function render() {
+  var m = document.getElementById('main');
+  var title = { home: 'Night Report', nights: 'New report', edit: 'Review · ' + fmtNight(S.date), preview: 'Preview', settings: 'Settings' }[UI.view];
+  document.getElementById('ttl').textContent = title;
+  document.getElementById('back').style.display = UI.view === 'home' ? 'none' : '';
+  m.innerHTML = UI.view === 'home' ? viewHome() : UI.view === 'nights' ? viewNights() : UI.view === 'edit' ? viewEdit() : UI.view === 'preview' ? viewPreview() : viewSettings();
+  document.getElementById('busy').style.display = UI.busy ? 'flex' : 'none';
+  document.getElementById('busyMsg').textContent = UI.busy;
+  if (UI.view === 'preview') fitPreview();
+  if (UI.lastView !== UI.view) { window.scrollTo(0, 0); UI.lastView = UI.view; }
+}
+
+function toast(msg) {
+  var t = document.getElementById('toast');
+  t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toast.t); toast.t = setTimeout(function () { t.style.display = 'none'; }, 5500);
+}
+
+function say(msg) { UI.busy = msg; var e = document.getElementById('busyMsg'); if (e) e.textContent = msg; }
+
+async function withBusy(msg, fn) {
+  UI.busy = msg; render();
+  try { return await fn(); }
+  catch (e) { toast(e.message || String(e)); }
+  finally { UI.busy = ''; render(); }
+}
+
+/* ---------- Actions ---------- */
+var A = {
+  go: function (v) { UI.view = v; render(); },
+  back: function () { UI.view = UI.view === 'preview' ? 'edit' : UI.view === 'edit' ? 'nights' : 'home'; if (UI.view === 'nights' && !UI.nights.length) UI.view = 'home'; render(); },
+
+  saveSettings: function () {
+    localStorage.setItem('nr_client_id', document.getElementById('s_cid').value.trim());
+    localStorage.setItem('nr_input', document.getElementById('s_input').value.trim());
+    localStorage.setItem('nr_title', document.getElementById('s_title').value.trim() || 'W12 night shift report');
+    tokenClient = null; accessToken = '';
+    toast('Settings saved');
+    UI.view = 'home'; render();
+  },
+
+  signIn: function () {
+    withBusy('Signing in…', async function () {
+      await getToken(true);
+      UI.signed = true;
+      await refreshIndex();
+    });
+  },
+
+  openNights: function () {
+    withBusy('Looking in your Drive folder…', async function () {
+      if (!UI.signed) { await getToken(true); UI.signed = true; await refreshIndex(); }
+      UI.nights = await listNights();
+      UI.view = 'nights';
+    });
+  },
+
+  pick: function (iso) {
+    var n = UI.nights.filter(function (x) { return x.iso === iso; })[0];
+    if (!n) return;
+    UI.curNight = n;
+    withBusy('Reading the files for ' + fmtNight(iso) + '…', async function () {
+      S = await pullNight(n, say);
+      UI.view = 'edit';
+    });
+  },
+
+  reload: function () {
+    if (!UI.curNight || (S.src && !S.src.nightIso)) return;
+    if (!confirm('Read the folder again? Changes you made on this screen will be replaced.')) return;
+    A.pick(UI.curNight.iso);
+  },
+
+  openNight: function (date) {
+    var e = UI.index.filter(function (x) { return x.date === date; })[0];
+    if (!e) return;
+    withBusy('Opening ' + fmtNight(date) + '…', async function () { await loadNight(e); UI.view = 'preview'; });
+  },
+
+  hcName: function (i, v) { S.headcount[i].name = v; },
+  hcCount: function (i, v) { S.headcount[i].count = parseInt(v, 10) || 0; S.headcount[i].unsure = false; document.getElementById('hcTotal').textContent = sumCounts(S.headcount); },
+  hcDel: function (i) { S.headcount.splice(i, 1); render(); },
+  hcAdd: function () { S.headcount.push({ name: '', count: 0 }); render(); },
+
+  setWelder: function (k, v) { S.welders[k] = parseInt(v, 10) || 0; },
+
+  conAdd: function () { S.concerns.push({ trade: 'All', text: '' }); render(); },
+  conTrade: function (i, v) { S.concerns[i].trade = v; },
+  conText: function (i, v) { S.concerns[i].text = v; },
+  conDel: function (i) { S.concerns.splice(i, 1); render(); },
+
+  phKind: function (i, v) { S.photos[i].kind = v; },
+  phCap: function (i, v) { S.photos[i].caption = v; },
+  phDel: function (i) { var p = S.photos.splice(i, 1)[0]; if (p && p.id) S.removedPhotoIds.push(p.id); render(); },
+
+  preview: function () { UI.view = 'preview'; render(); },
+
+  save: function () {
+    withBusy('Building PDF and saving to Drive…', async function () {
+      var pdf = await makePdf();
+      var e = await saveNight(pdf);
+      toast('Saved to Drive: ' + fmtNight(e.date));
+    });
+  },
+
+  downloadPdf: function () {
+    withBusy('Building PDF…', async function () {
+      var pdf = await makePdf();
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(pdf); a.download = 'Night report ' + S.date + '.pdf';
+      document.body.appendChild(a); a.click(); a.remove();
+    });
+  }
+};
+
+/* ---------- Boot ---------- */
+function boot() {
+  var st = document.createElement('style');
+  st.textContent = REPORT_CSS;
+  document.head.appendChild(st);
+  document.getElementById('gear').onclick = function () { UI.view = 'settings'; render(); };
+  window.addEventListener('resize', fitPreview);
+  render();
+  if (localStorage.getItem('nr_signed') && setting('client_id', '')) {
+    var tries = 0;
+    (function wait() {
+      if (window.google && google.accounts && google.accounts.oauth2) {
+        getToken(false).then(function () { UI.signed = true; return refreshIndex(); }).then(render).catch(function () { render(); });
+      } else if (tries++ < 40) setTimeout(wait, 250);
+    })();
+  }
+}
+if (typeof document !== 'undefined' && document.getElementById('main')) boot();
+
+</script>
+</body>
+</html>
