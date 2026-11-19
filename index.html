@@ -232,7 +232,7 @@ function classifyImageText(text) {
   var t = String(text || '').toLowerCase().replace(/\s+/g, ' ');
   var tradeWords = ['rigger', 'plater', 'scaffolder', 'welder', 'fitter', 'pwht', 'fire watcher', 'materials controller', 'chargehand', 'staff', 'operative', 'labourer', 'electrician'];
   var trades = tradeWords.filter(function (w) { return t.indexOf(w) >= 0; }).length;
-  if ((/total/.test(t) && trades >= 3) || (/head\s?count/.test(t) && trades >= 2)) return 'headcount';
+  if ((/total/.test(t) && trades >= 3) || (/head\s?count/.test(t) && (trades >= 1 || /trade|count|total/.test(t.replace(/head\s?count/g, ''))))) return 'headcount';
   var dabsWords = ['activity description', 'activity desc', 'remark', 'blocker', 'not done', 'ongoing', 'tag no', 'dabs', 'night added'];
   var dh = dabsWords.filter(function (w) { return t.indexOf(w) >= 0; }).length;
   if (dh >= 3) return 'dabs';
@@ -267,8 +267,23 @@ function calcSummary(jobs) {
 }
 
 /* Headcount text: lines like "Rigger Chargehand 5", "| Plater | 15 |", "Staff: 7" */
+/* small OCR slips in a trade name ("PWHIT", "Scaffoider") are snapped to the known name */
+var KNOWN_TRADES = ['Staff', 'Rigger Chargehand', 'Rigger', 'Plater Chargehand', 'Plater', 'Scaffolder', 'Pipe Welder Chargehand', 'Pipe Welder', 'Pipe Fitter Chargehand', 'Pipe Fitter', 'PWHT', 'Fire Watcher / General Operative', 'Materials Controller', 'Electrician', 'Insulator', 'Painter', 'Labourer'];
+function editDist(a, b) {
+  var m = a.length, n = b.length, d = [], i, j;
+  for (i = 0; i <= m; i++) { d[i] = [i]; }
+  for (j = 0; j <= n; j++) d[0][j] = j;
+  for (i = 1; i <= m; i++) for (j = 1; j <= n; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[m][n];
+}
+function snapTrade(name) {
+  var n = String(name || '').trim(), low = n.toLowerCase(), best = null, bd = 99;
+  KNOWN_TRADES.forEach(function (k) { var dd = editDist(low, k.toLowerCase()); if (dd < bd) { bd = dd; best = k; } });
+  return best && bd > 0 && bd <= Math.max(1, Math.floor(best.length / 5)) ? best : n;
+}
+
 function abbrevTrade(name) {
-  var n = String(name || '').replace(/\s+/g, ' ').trim();
+  var n = snapTrade(String(name || '').replace(/\s+/g, ' ').trim());
   n = n.replace(/chargehands?/ig, 'CH');
   n = n.replace(/fire watcher\s*\/\s*general operative/i, 'FW / Gen Op');
   n = n.replace(/materials controller/i, 'Mat. Controller');
@@ -499,12 +514,16 @@ function findGrid(img) {
   var W = img.w, H = img.h, g = img.g, y, x;
   var rowFlag = new Array(H);
   for (y = 0; y < H; y++) { var n = 0; for (x = 0; x < W; x++) if (g[y * W + x] < 110) n++; rowFlag[y] = n > 0.6 * W; }
-  var hl = runGroups(rowFlag);
+  /* a dark band touching the picture edge (screenshot border) is not a table line */
+  var inner = function (gs, n) { return gs.filter(function (r) { return r.s > 2 && r.e < n - 3; }); };
+  var hl = inner(runGroups(rowFlag), H);
   if (hl.length < 4) return null;
   var y0 = hl[0].s, y1 = hl[hl.length - 1].e, colFlag = new Array(W);
   for (x = 0; x < W; x++) { var m = 0; for (y = y0; y <= y1; y++) if (g[y * W + x] < 110) m++; colFlag[x] = m > 0.5 * (y1 - y0 + 1); }
-  var vl = runGroups(colFlag);
+  var vl = inner(runGroups(colFlag), W);
   if (vl.length < 3) return null;
+  /* trade column = first two lines, count column = last two lines */
+  vl = [vl[0], vl[vl.length - 2], vl[vl.length - 1]];
   return { hl: hl, vl: vl };
 }
 
@@ -1358,6 +1377,7 @@ async function pullNight(night, say) {
   if (!st.src.hcSource && hcImg) {
     try {
       var url = await itemUrl(hcImg);
+      if (!hcImg.url) url = await cropToPage(url);
       if (hcImg.rot) url = await rotatedUrl(url, hcImg.rot);
       st.src.hcImg = url;
       if (!window.Tesseract) warn('The picture reader did not load. Enter the headcount below, or upload headcount as a .txt or Excel file.');
